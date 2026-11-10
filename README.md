@@ -1,8 +1,7 @@
 # LibGuildSync
 
-The shared code of a family of guild addons for WoW Forever (the `_forever_`
-client, 1.60.x): Guild Professions & Recipes, Bot'tar Sync and Guild Bank
-Alts. It does nothing on its own; install it because one of those addons
+Shared code for guild addons on WoW Forever (the `_forever_` client,
+1.60.x). It does nothing on its own; install it because an addon you use
 needs it (the CurseForge app does it for you).
 
 What it gives each addon:
@@ -36,14 +35,14 @@ local ADDON_NAME, ns = ...
 ns.ADDON_NAME = ADDON_NAME
 
 LibGuildSync.Attach(ns, {
-    title = "Guild Bank Alts",        -- in the messages the player sees
-    tag = "GBA",                      -- in the debug log
-    prefix = "GuildBankAlts",         -- at most 16 characters
-    trialPrefix = "GuildBankAltsDev", -- used while trial is true
+    title = "My Guild Addon",         -- in the messages the player sees
+    tag = "MGA",                      -- in the debug log
+    prefix = "MyGuildAddon",          -- at most 16 characters
+    trialPrefix = "MyGuildAddonDev",  -- used while trial is true
     trial = false,
     protocol = "1",                   -- one character, in every chunk
     legacy = nil,                     -- older protocols still read: { ["0"] = true }
-    savedVariable = "GuildBankAltsDB",
+    savedVariable = "MyGuildAddonDB",
 })
 ```
 

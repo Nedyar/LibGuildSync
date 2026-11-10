@@ -1,17 +1,16 @@
--- LibGuildSync: the code the guild addons share (Guild Professions &
--- Recipes, Bot'tar Sync, Guild Bank Alts...): hidden addon messages, the
+-- LibGuildSync: shared code for guild addons: hidden addon messages, the
 -- guild roster, a saved database of the members' records and the sync that
 -- keeps every member's copy of it the same.
 --
 -- An addon attaches to it once its files load:
 --
 --   LibGuildSync.Attach(ns, {
---       title = "Guild Bank Alts",       -- in the messages the player sees
---       tag = "GBA",                     -- in the debug log
---       prefix = "GuildBankAlts",        -- its addon message prefix
---       trialPrefix = "GuildBankAltsDev", trial = false,
+--       title = "My Guild Addon",        -- in the messages the player sees
+--       tag = "MGA",                     -- in the debug log
+--       prefix = "MyGuildAddon",         -- its addon message prefix
+--       trialPrefix = "MyGuildAddonDev", trial = false,
 --       protocol = "1", legacy = nil,    -- its protocol, older ones still read
---       savedVariable = "GuildBankAltsDB",
+--       savedVariable = "MyGuildAddonDB",
 --   })
 --
 -- and starts it at PLAYER_LOGIN with LibGuildSync.Start(ns). Attach puts in
