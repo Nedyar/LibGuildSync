@@ -28,13 +28,35 @@ local function ReadToc(path, name)
     end
     return addon
 end
+H.ReadToc = ReadToc
 
--- What each client loads: the library, then the addon under test.
+-- What each client loads: the library, then the addon under test (a client
+-- made with options.addons loads those instead, such as an older release).
 H.ADDONS = { ReadToc(H.LIB, "LibGuildSync"), ReadToc(H.ADDON, assert(ADDON_NAME, "set ADDON_NAME")) }
 H.MAIN = H.ADDONS[2]
 H.NAME = H.MAIN.name
 -- The addon under test's files.
 H.FILES = H.MAIN.files
+
+-- A released version of the addon under test (its git tag, such as
+-- "v0.1.0"), extracted from the addon's repository into its Tests/out, for
+-- tests that mix versions in one guild: H.ReadToc of it, or nil when git or
+-- tar cannot give it (the test is then skipped).
+function H.Release(tag)
+    local folder = ("%s/Tests/out/%s/%s"):format(H.ADDON, tag, H.NAME)
+    local function Exists()
+        local file = io.open(folder .. "/" .. H.NAME .. ".toc")
+        if file then
+            file:close()
+            return true
+        end
+        return false
+    end
+    if not Exists() then
+        os.execute(('git -C "%s" archive --prefix=out/%s/%s/ %s | tar -x -f - -C "%s/Tests"'):format(H.ADDON, tag, H.NAME, tag, H.ADDON))
+    end
+    return Exists() and ReadToc(folder, H.NAME) or nil
+end
 
 -- Assertions ------------------------------------------------------------------
 
@@ -141,6 +163,11 @@ function H.NewWorld(options)
         realm = "TestRealm",
         errors = {},
         dict = {},
+        recipeSkill = {}, -- recipe ID -> profession skill line (World:OpenProfession)
+        itemSlots = {},   -- [itemID] = "INVTYPE_..." (C_Item.GetItemInfoInstant)
+        reagents = {},    -- [recipeID] = { { itemID, quantity }... } (else 2 x item 2447)
+        noItem = {},      -- [recipeID] = true when it makes no item (an enchantment)
+        unloaded = {},    -- [itemID] = true while no client has loaded the item (see "Items" in MakeEnv)
         lastDelivery = {},
         jitter = options.jitter or 0.15,
         senderFormat = options.senderFormat or "full",
@@ -265,13 +292,24 @@ for name in ([[AddLine ClearAllPoints EnableMouse HighlightText RegisterForClick
     SetSize SetSpacing SetSpellByID SetStatusBarColor SetStatusBarTexture SetTexCoord SetTexture SetTitle
     SetToplevel SetValue SetWidth SetWordWrap StartMoving StopMovingOrSizing SetMaxLetters SetMaxBytes
     SetDataProvider SetElementInitializer SetElementExtentCalculator SetFrameLevel SetAtlas SetBlendMode
-    SetTextColor SetVertexColor SetNumeric ClearFocus SetTextInsets SetHorizTile SetVertTile]]):gmatch("%a+") do
+    SetTextColor SetVertexColor SetNumeric ClearFocus SetHorizTile SetVertTile AddMaskTexture IsTruncated
+    SetFillToInterior]]):gmatch("%a+") do
     H.NoOpMethods[name] = true
 end
 
 -- Regions that Blizzard's templates give a frame, by template.
 H.TemplateRegions = {
+    CircularGiantItemButtonTemplate = { Icon = "Texture", IconBorder = "Texture", Count = "FontString" },
+    InputBoxInstructionsTemplate = { Instructions = "FontString" },
+    InputScrollFrameTemplate = { EditBox = "EditBox", CharCount = "FontString" },
+    LargeSideTabButtonTemplate = { Background = "Texture", Icon = "Texture", SelectedTexture = "Texture" },
     RightSideTabTemplate = { Icon = "Texture", IconOverlay = "Texture" },
+}
+
+-- The size that Blizzard's templates give a frame, by template ({ width,
+-- height }); any other frame has no size (0).
+H.TemplateSizes = {
+    LargeSideTabButtonTemplate = { 0, 55 },
 }
 
 H.FrameMethods = {
@@ -341,12 +379,23 @@ H.FrameMethods = {
     GetStringWidth = function(self)
         return 6 * #(self._text or "")
     end,
-    -- Frames have no size in the tests.
-    GetWidth = function()
-        return 0
+    -- Frames have no size in the tests, but what a template gives them
+    -- (H.TemplateSizes).
+    GetWidth = function(self)
+        return self._width or 0
     end,
-    GetHeight = function()
-        return 0
+    GetHeight = function(self)
+        return self._height or 0
+    end,
+    GetFrameLevel = function()
+        return 1
+    end,
+    CreateMaskTexture = function(self)
+        return NewObject(self._client, "MaskTexture")
+    end,
+    -- An edit box's text insets, for the tests to check.
+    SetTextInsets = function(self, left, right, top, bottom)
+        self._insets = { left, right, top, bottom }
     end,
     SetScale = function(self, scale)
         self._scale = scale
@@ -390,24 +439,41 @@ H.FrameMethods = {
 }
 
 -- Blizzard's menus (Blizzard_Menu), as a dropdown builds them: the entries
--- its generator makes, in order.
+-- its generator makes, in order. A button's own entries (its submenu) are
+-- in its .entries.
 function H.NewMenuDescription()
     local description = { entries = {} }
-    function description:CreateRadio(text, isSelected, setSelected, data)
-        local entry = { kind = "radio", text = text, isSelected = isSelected, setSelected = setSelected, data = data }
-        self.entries[#self.entries + 1] = entry
+    local function Add(entry)
+        function entry:SetTitleAndTextTooltip(title, tooltip)
+            self.tooltip = tooltip
+        end
+        description.entries[#description.entries + 1] = entry
         return entry
     end
+    function description:CreateRadio(text, isSelected, setSelected, data)
+        return Add({ kind = "radio", text = text, isSelected = isSelected, setSelected = setSelected, data = data })
+    end
     function description:CreateCheckbox(text, isSelected, setSelected, data)
-        local entry = { kind = "checkbox", text = text, isSelected = isSelected, setSelected = setSelected, data = data }
-        self.entries[#self.entries + 1] = entry
-        return entry
+        return Add({ kind = "checkbox", text = text, isSelected = isSelected, setSelected = setSelected, data = data })
+    end
+    function description:CreateButton(text, callback, data)
+        local entry = H.NewMenuDescription()
+        entry.kind, entry.text, entry.callback, entry.data = "button", text, callback, data
+        return Add(entry)
     end
     return description
 end
 
+-- The entries of a dropdown's menu, as the game builds it when it opens.
+function H.MenuOf(dropdown)
+    local root = H.NewMenuDescription()
+    dropdown._menuGenerator(dropdown, root)
+    return root.entries
+end
+
 -- A dropdown's menu (WowStyle1DropdownTemplate): SetupMenu builds it right
--- away, GenerateMenu again; the text is the selected radio's.
+-- away, GenerateMenu again. A menu of radios shows the selected one's text;
+-- another (a filter dropdown's) keeps the dropdown's own.
 H.FrameMethods.SetupMenu = function(self, generator)
     self._menuGenerator = generator
     self:GenerateMenu()
@@ -416,18 +482,106 @@ H.FrameMethods.GenerateMenu = function(self)
     local root = H.NewMenuDescription()
     self._menuGenerator(self, root)
     self._menu = root.entries
-    self._text = nil
+    local radios, selected = false, nil
     for _, entry in ipairs(root.entries) do
-        if entry.kind == "radio" and entry.isSelected(entry.data) then
-            self._text = entry.text
+        if entry.kind == "radio" then
+            radios = true
+            if entry.isSelected(entry.data) then
+                selected = entry.text
+            end
         end
+    end
+    if radios then
+        self._text = selected
     end
 end
 
--- A stand-in for Blizzard's guild window (CommunitiesFrame): its side tabs,
--- the communities list, the chat, and its display mode.
+-- A filter dropdown (WowDropdownFilterBehaviorMixin): its reset button shows
+-- while the filters are not the default ones.
+H.FrameMethods.SetDefaultCallback = function(self, callback)
+    self._default = callback
+end
+H.FrameMethods.SetIsDefaultCallback = function(self, callback)
+    self._isDefault = callback
+end
+H.FrameMethods.ValidateResetState = function(self)
+    self._resetShown = not self._isDefault()
+end
+
+-- Blizzard's side tabs of the guild window.
 H.BLIZZARD_TABS = { "ChatTab", "RosterTab", "GuildBenefitsTab", "GuildInfoTab", "GuildPreferredPlaySettingsTab" }
 
+-- The member list (CommunitiesMemberListMixin) of the guild window, in its
+-- expanded display (the Roster tab): a row for every roster member (when
+-- the client logs in) and a column display with six headers.
+local function FakeMemberList(client)
+    local list = H.NewObject(client, "Frame")
+    list.expandedDisplay = true
+    rawset(list, "GetSelectedClubInfo", function()
+        return { clubType = 2 }
+    end)
+    rawset(list, "GetGuildColumnIndex", function()
+        return list.guildColumnIndex
+    end)
+    rawset(list, "RefreshLayout", function() end)
+    list.ColumnDisplay = H.NewObject(client, "Frame")
+    local headers = {}
+    for i = 1, 6 do
+        local header = H.NewObject(client, "Button")
+        rawset(header, "GetID", function()
+            return i
+        end)
+        rawset(header, "SetPoint", function(self, ...)
+            self._lastPoint = { ... }
+        end)
+        headers[i] = header
+    end
+    list.ColumnDisplay.columnHeaders = {
+        EnumerateActive = function()
+            local i = 0
+            return function()
+                i = i + 1
+                return headers[i]
+            end
+        end,
+    }
+    list.headers = headers
+    list.columnInfo = { {}, {}, {}, {}, {}, {} }
+    local rows = {}
+    for _, member in ipairs(client.world.roster) do
+        local row = H.NewObject(client, "Button")
+        row.expanded = true
+        row.isInvitation = false
+        row.memberInfo = { guid = member.guid, name = member.short }
+        rawset(row, "GetMemberInfo", function(self)
+            return self.memberInfo
+        end)
+        rawset(row, "RefreshExpandedColumns", function() end)
+        row.ProfessionHeader = H.NewObject(client, "Frame")
+        row.ProfessionHeader:Hide()
+        row.FactionButton = H.NewObject(client, "Button")
+        row.FactionButton:Hide()
+        row.Rank = H.NewObject(client, "FontString")
+        row.Note = H.NewObject(client, "FontString")
+        -- Where the Note column ends, for the tests to check.
+        rawset(row.Note, "SetPoint", function(self, point, relative)
+            self._right = relative
+        end)
+        rows[#rows + 1] = row
+    end
+    list.rows = rows
+    list.ScrollBox = H.NewObject(client, "Frame")
+    rawset(list.ScrollBox, "ForEachFrame", function(_, fn)
+        for _, row in ipairs(rows) do
+            fn(row)
+        end
+    end)
+    return list
+end
+
+-- A stand-in for Blizzard's guild window (CommunitiesFrame): its side tabs
+-- (as for a guild without benefits), the communities list, the chat, its
+-- display mode, and the member list.
 function H.FakeCommunities(client)
     local frame = H.NewObject(client, "Frame")
     for _, key in ipairs(H.BLIZZARD_TABS) do
@@ -440,7 +594,7 @@ function H.FakeCommunities(client)
     frame.Chat = H.NewObject(client, "Frame")
     frame.Chat.ScrollBar = H.NewObject(client, "EventFrame")
     -- Pieces of the views, which an addon's panel makes invisible.
-    frame.MemberList = H.NewObject(client, "Frame")
+    frame.MemberList = FakeMemberList(client)
     frame.GuildDetailsFrame = H.NewObject(client, "Frame")
     frame.displayMode = "Roster"
     frame.RosterTab:SetChecked(true)
@@ -471,8 +625,34 @@ function World:RealmID(realm)
 end
 
 H.CLASS_FILES = { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", nil, "SHAMAN", "MAGE", "WARLOCK", nil, "DRUID" }
+H.CLASS_NAMES = { "Warrior", "Paladin", "Hunter", "Rogue", "Priest", nil, "Shaman", "Mage", "Warlock", nil, "Druid" }
+H.RACES = { [1] = { "Human", "Human" }, [2] = { "Orc", "Orc" }, [3] = { "Dwarf", "Dwarf" }, [4] = { "NightElf", "Night Elf" } }
+
+-- A fake class talent tree (C_Traits): three tabs, nodes on a grid of 600
+-- units between columns and 600 between rows, like Blizzard's.
+H.TREE = {
+    id = 773,
+    tabs = { { groupID = 11, name = "Beast Mastery" }, { groupID = 12, name = "Marksmanship" }, { groupID = 13, name = "Survival" } },
+    -- id, tab, column, row, max rank; each tab starts 3000 units further right.
+    nodes = {
+        { 101, 1, 1, 1, 5 }, { 102, 1, 2, 1, 5 }, { 103, 1, 1, 2, 2 }, { 104, 1, 3, 2, 3 }, { 105, 1, 2, 3, 1 },
+        { 201, 2, 2, 1, 5 }, { 202, 2, 3, 1, 5 }, { 203, 2, 1, 2, 3 }, { 204, 2, 2, 3, 1 }, { 205, 2, 4, 4, 5 },
+        { 301, 3, 1, 1, 5 }, { 302, 3, 3, 1, 5 }, { 303, 3, 2, 2, 3 },
+    },
+    -- a hidden node of another spec, which must be left out
+    hidden = { 999, 1, 1, 1, 1 },
+}
+
+function H.NodePosition(node)
+    return (node[2] - 1) * 3000 + (node[3] - 1) * 600 + 1200, (node[4] - 1) * 600 + 1500
+end
+
 -- options.realm: the character's realm (members of a guild can be on several).
--- In the roster: level, classID, rank, rankIndex, note.
+-- The character: level, classID, raceID, sex, faction, itemLevel (average),
+-- gear = { [slot] = { link, il } }, talents = { active, groups = { [group]
+-- = { [nodeID] = rank } }, unspent, staged }, professions = list in
+-- GetProfessions order of { sl = skillLine, r = rank, m = max, spell =
+-- spellID, hasRecipes = bool }. In the roster: rank, rankIndex, note.
 function World:NewClient(name, options)
     options = options or {}
     local realm = options.realm or self.realm
@@ -485,6 +665,13 @@ function World:NewClient(name, options)
         locale = options.locale or "enUS",
         level = options.level or 60,
         classID = options.classID or 3,
+        raceID = options.raceID or 4,
+        sex = options.sex or 3,
+        faction = options.faction or "Alliance",
+        itemLevel = options.itemLevel,
+        gear = options.gear or {},
+        talents = options.talents,
+        professions = options.professions or {},
         eventFrames = {},
         updateFrames = {},
         printed = {},
@@ -494,6 +681,9 @@ function World:NewClient(name, options)
         lockdown = false,
         saved = options.saved, -- the account's saved variables: { [variable] = value }
         globals = options.globals, -- set in the client's environment before its addons load
+        -- The addons it loads, in order (H.ReadToc of each): H.ADDONS unless
+        -- given, such as an older release of the addon under test.
+        addons = options.addons or H.ADDONS,
         -- What the character holds: containers by bag ID, as { size = slots,
         -- [slot] = { itemID, count, link } }; the bank tabs (6 to 14) can be
         -- read only while the bank is open (World:OpenBank).
@@ -504,6 +694,11 @@ function World:NewClient(name, options)
         -- The bag (item ID) in each bag slot (1 to 5) and each bank bag slot.
         bagItems = options.bagItems or {},
         bankBags = options.bankBags or {},
+        -- Mail received (World:Mail, World:TakeMail): { { from = name, items
+        -- = { { itemID, count } or false (taken)... }, money = copper }... }.
+        -- What is taken goes to client.bags ({ [itemID] = count }, what
+        -- C_Item.GetItemCount counts) and client.money; while client.bagsFull
+        -- is set the game refuses items.
         inbox = {},
     }
     self.clients[#self.clients + 1] = client
@@ -606,7 +801,7 @@ function World:Login(client, options)
     client.namespaces = {}
     client.eventFrames, client.updateFrames, client.printed = {}, {}, {}
     client.loggedIn = true
-    for _, addon in ipairs(H.ADDONS) do
+    for _, addon in ipairs(client.addons) do
         local ns = {}
         client.namespaces[addon.name] = ns
         for _, path in ipairs(addon.files) do
@@ -628,7 +823,7 @@ end
 function World:Logout(client)
     self:FireEvent(client, "PLAYER_LOGOUT")
     client.saved = {}
-    for _, addon in ipairs(H.ADDONS) do
+    for _, addon in ipairs(client.addons) do
         for _, variable in ipairs(addon.saved) do
             client.saved[variable] = H.DeepCopy(client.env[variable])
         end
@@ -640,6 +835,29 @@ function World:Logout(client)
         end
     end
     self:RosterChanged(client)
+end
+
+-- Professions ----------------------------------------------------------------------------
+
+-- Opens a profession window on the client: all = every recipe of the
+-- profession, learned = the ones the character knows.
+function World:OpenProfession(client, skillLine, all, learned, linked)
+    local set = {}
+    for _, id in ipairs(learned) do
+        set[id] = true
+        self.recipeSkill[id] = skillLine
+    end
+    for _, id in ipairs(all) do
+        self.recipeSkill[id] = skillLine
+    end
+    client.session = { sl = skillLine, all = all, learned = set, linked = linked }
+    self:FireEvent(client, "TRADE_SKILL_SHOW")
+    self:FireEvent(client, "TRADE_SKILL_LIST_UPDATE")
+end
+
+function World:CloseProfession(client)
+    client.session = nil
+    self:FireEvent(client, "TRADE_SKILL_CLOSE")
 end
 
 -- Bags, bank and money ------------------------------------------------------------------
@@ -696,14 +914,22 @@ end
 -- Trade and mail ------------------------------------------------------------------------
 
 -- A trade between two clients, each putting in items ({ { itemID, count }...
--- by slot }), with the game's events. options.cancel: it is cancelled.
+-- by slot }), with the game's events. options.cancel: it is cancelled;
+-- options.aMoney, options.bMoney: the copper each side puts in.
 function World:Trade(a, b, aItems, bItems, options)
-    a.trade = { partner = b, mine = aItems or {}, theirs = bItems or {} }
-    b.trade = { partner = a, mine = bItems or {}, theirs = aItems or {} }
+    options = options or {}
+    a.trade = { partner = b, mine = aItems or {}, theirs = bItems or {}, myMoney = options.aMoney, theirMoney = options.bMoney }
+    b.trade = { partner = a, mine = bItems or {}, theirs = aItems or {}, myMoney = options.bMoney, theirMoney = options.aMoney }
     for _, client in ipairs({ a, b }) do
         self:FireEvent(client, "TRADE_SHOW")
+        if client.trade.myMoney or client.trade.theirMoney then
+            self:FireEvent(client, "TRADE_MONEY_CHANGED")
+        end
         for slot in pairs(client.trade.mine) do
             self:FireEvent(client, "TRADE_PLAYER_ITEM_CHANGED", slot)
+        end
+        for slot in pairs(client.trade.theirs) do
+            self:FireEvent(client, "TRADE_TARGET_ITEM_CHANGED", slot)
         end
         self:FireEvent(client, "TRADE_ACCEPT_UPDATE", 1, 0)
     end
@@ -713,7 +939,7 @@ function World:Trade(a, b, aItems, bItems, options)
         client.trade = nil
         self:FireEvent(client, "TRADE_CLOSED")
         self:FireEvent(client, "TRADE_CLOSED")
-        if options and options.cancel then
+        if options.cancel then
             self:FireEvent(client, "UI_INFO_MESSAGE", 227, "Trade cancelled.")
         else
             self:FireEvent(client, "UI_INFO_MESSAGE", 226, "Trade complete.")
@@ -722,17 +948,46 @@ function World:Trade(a, b, aItems, bItems, options)
 end
 
 -- Mail from a client to a name as typed, with items ({ { itemID, count }...
--- by slot }). options.fail: the game refuses to send it.
+-- by slot }). options.fail: the game refuses to send it; options.money:
+-- the copper it carries. Sent, it lands in the inbox of the client of that
+-- name, if there is one (World:TakeMail).
 function World:Mail(from, toName, items, options)
+    options = options or {}
     from.sendMail = items
     self:FireEvent(from, "MAIL_SEND_INFO_UPDATE")
     from.env.SendMail(toName, "Subject", "")
-    if options and options.fail then
+    if options.fail then
         self:FireEvent(from, "MAIL_FAILED")
     else
         self:FireEvent(from, "MAIL_SEND_SUCCESS")
+        local to = self:FindClient(toName)
+        if to then
+            -- The attachments, in the order of their slots.
+            local copy = {}
+            for slot = 1, 12 do
+                local item = items[slot]
+                if item then
+                    copy[#copy + 1] = { item[1], item[2] }
+                end
+            end
+            to.inbox[#to.inbox + 1] = { from = from.name, items = copy, money = options.money }
+        end
     end
     from.sendMail = nil
+end
+
+-- Takes the items of a mail of the client's inbox: one slot, the money
+-- ("money"), or all of it; then runs the world a second for the server's
+-- answer.
+function World:TakeMail(client, index, slot)
+    if slot == "money" then
+        client.env.TakeInboxMoney(index)
+    elseif slot then
+        client.env.TakeInboxItem(index, slot)
+    else
+        client.env.AutoLootMailItem(index)
+    end
+    self:RunFor(1)
 end
 
 -- The server -------------------------------------------------------------------------
@@ -928,6 +1183,10 @@ function World:MakeEnv(client)
         for key, kind in pairs(H.TemplateRegions[template] or {}) do
             rawset(frame, key, NewObject(client, kind))
         end
+        local size = H.TemplateSizes[template]
+        if size then
+            frame._width, frame._height = size[1], size[2]
+        end
         client.created = client.created or {}
         client.created[#client.created + 1] = frame
         if name then
@@ -937,7 +1196,7 @@ function World:MakeEnv(client)
     end
     api.C_AddOns = {
         GetAddOnMetadata = function(name, field)
-            for _, addon in ipairs(H.ADDONS) do
+            for _, addon in ipairs(client.addons) do
                 if addon.name == name then
                     return addon.fields[field]
                 end
@@ -950,7 +1209,11 @@ function World:MakeEnv(client)
     api.Enum = {
         SendAddonMessageResult = { Success = 0, InvalidMessage = 2, AddonMessageThrottle = 3, ChannelThrottle = 8, NotInGuild = 10, AddOnMessageLockdown = 11, TargetOffline = 12 },
         CompressionMethod = { Deflate = 0, Zlib = 1, Gzip = 2 },
+        SpellBookSpellBank = { Player = 0, Pet = 1 },
         ClubType = { BattleNet = 0, Character = 1, Guild = 2, Other = 3 },
+        CraftingReagentType = { Modifying = 0, Basic = 1 },
+        Profession = { FirstAid = 0, Blacksmithing = 1, Leatherworking = 2, Alchemy = 3, Herbalism = 4, Cooking = 5, Mining = 6,
+            Tailoring = 7, Engineering = 8, Enchanting = 9, Fishing = 10, Skinning = 11 },
     }
     api.C_ChatInfo = {
         RegisterAddonMessagePrefix = function()
@@ -1046,14 +1309,139 @@ function World:MakeEnv(client)
             end, client)
         end,
     }
+    -- Professions (see World:NewClient and World:OpenProfession).
+    api.GetProfessions = function()
+        local result = {}
+        for i = 1, 7 do
+            result[i] = client.professions[i] and i or nil
+        end
+        return unpack(result, 1, 7)
+    end
+    api.GetProfessionInfo = function(index)
+        local prof = client.professions[index]
+        return "Prof" .. prof.sl, 1000 + index, prof.r, prof.m, 2, index * 10, prof.sl, 0, 0, 0, "Prof" .. prof.sl
+    end
+    api.IsPlayerSpell = function(spellID)
+        return client.knownSpells ~= nil and client.knownSpells[spellID] == true
+    end
+    api.C_SpellBook = {
+        GetSpellBookItemInfo = function(slot)
+            for index = 1, 7 do
+                local prof = client.professions[index]
+                if prof and index * 10 + 1 == slot then
+                    return { spellID = prof.spell, actionID = prof.spell }
+                end
+            end
+            return {}
+        end,
+    }
+    local function SessionFlag()
+        return client.session ~= nil and client.session.linked == true
+    end
+    api.C_TradeSkillUI = {
+        CanTradeSkillShowCraftingUI = function(spellID)
+            for index = 1, 7 do
+                local prof = client.professions[index]
+                if prof and prof.spell == spellID then
+                    return prof.hasRecipes
+                end
+            end
+            return false
+        end,
+        IsTradeSkillReady = function()
+            return client.session ~= nil
+        end,
+        IsDataSourceChanging = function()
+            return false
+        end,
+        IsTradeSkillLinked = SessionFlag,
+        IsTradeSkillGuild = function()
+            return false
+        end,
+        IsTradeSkillGuildMember = function()
+            return false
+        end,
+        IsNPCCrafting = function()
+            return false
+        end,
+        GetChildProfessionInfo = function()
+            return { professionID = client.session and client.session.sl or 0 }
+        end,
+        GetBaseProfessionInfo = function()
+            return { professionID = client.session and client.session.sl or 0 }
+        end,
+        GetAllRecipeIDs = function()
+            if client.noAllRecipeIDs then
+                return nil
+            end
+            return client.session and client.session.all or {}
+        end,
+        GetFilteredRecipeIDs = function()
+            return client.session and (client.session.filtered or client.session.all) or {}
+        end,
+        GetRecipeInfo = function(id)
+            -- Away from a profession window the game gives category 0.
+            return { name = "Recipe " .. id, learned = client.session ~= nil and client.session.learned[id] == true, categoryID = client.session and 5 or 0, isDummyRecipe = false }
+        end,
+        GetCategoryInfo = function()
+            return { name = "Category", uiOrder = 1 }
+        end,
+        GetProfessionInfoByRecipeID = function(id)
+            return { professionID = world.recipeSkill[id] or 0 }
+        end,
+        GetTradeSkillLineForRecipe = function(id)
+            return world.recipeSkill[id]
+        end,
+        GetTradeSkillDisplayName = function(skillLine)
+            return "Skill" .. skillLine
+        end,
+        GetTradeSkillTexture = function()
+            return 1
+        end,
+        -- Which profession a skill line is (Enum.Profession), for the real IDs.
+        GetProfessionInfoBySkillLineID = function(skillLine)
+            local kinds = { [164] = 1, [165] = 2, [171] = 3, [182] = 4, [185] = 5, [186] = 6, [197] = 7, [202] = 8, [333] = 9, [356] = 10, [393] = 11 }
+            return { profession = kinds[skillLine] }
+        end,
+        IsGuildTradeSkillsEnabled = function()
+            return false
+        end,
+        -- Recipe N makes item 100000 + N (none for world.noItem's), from
+        -- world.reagents' reagents or else 2 of item 2447.
+        GetRecipeSchematic = function(recipeID)
+            local slots = {}
+            for i, reagent in ipairs(world.reagents[recipeID] or { { 2447, 2 } }) do
+                slots[i] = { reagents = { { itemID = reagent[1] } }, quantityRequired = reagent[2], reagentType = 1 }
+            end
+            return {
+                name = "Recipe " .. recipeID, icon = 4, outputItemID = world.noItem[recipeID] and 0 or recipeID + 100000,
+                quantityMin = 1, quantityMax = recipeID % 2 + 1, reagentSlotSchematics = slots,
+            }
+        end,
+        GetRecipeDescription = function(recipeID)
+            return "Makes the item of recipe " .. recipeID .. "."
+        end,
+        GetRecipeRequirements = function()
+            return {}
+        end,
+    }
+    api.C_Spell = {
+        GetSpellName = function(id)
+            return "Spell" .. id
+        end,
+        GetSpellTexture = function()
+            return 2
+        end,
+        GetSpellLink = function()
+            return nil
+        end,
+        RequestLoadSpellData = function() end,
+    }
+    -- More of C_Item under "Items" below.
     api.C_Item = {
         GetItemIconByID = function()
             return 3
         end,
-        GetItemQualityByID = function()
-            return 1
-        end,
-        RequestLoadItemDataByID = function() end,
     }
     api.Ambiguate = function(name)
         return (name:gsub("%-[^%-]+$", ""))
@@ -1125,6 +1513,16 @@ function World:MakeEnv(client)
             rawset(scrollBox, "SetDataProvider", function(self, provider)
                 self._provider = provider
             end)
+            -- The element scrolled to, for the tests to check.
+            rawset(scrollBox, "ScrollToElementDataByPredicate", function(self, predicate)
+                self._scrolledTo = nil
+                for _, element in ipairs(self._provider and self._provider.elements or {}) do
+                    if predicate(element) then
+                        self._scrolledTo = element
+                        return
+                    end
+                end
+            end)
         end,
         AddAcquiredFrameCallback = function(scrollBox, callback, owner)
             rawset(scrollBox, "_acquired", function(frame)
@@ -1151,21 +1549,42 @@ function World:MakeEnv(client)
     api.RETRIEVING_ITEM_INFO = "Retrieving item information"
     api.NORMAL_FONT_COLOR = { GetRGB = function() return 1, 0.82, 0 end }
     api.GREEN_FONT_COLOR = { GetRGB = function() return 0, 1, 0 end }
+    api.C_Texture = {
+        GetAtlasInfo = function()
+            return { width = 128, height = 1020, file = 5, leftTexCoord = 0, rightTexCoord = 1, topTexCoord = 0, bottomTexCoord = 1 }
+        end,
+    }
+    -- The game's link handling, to check that nothing asks for links.
+    client.itemRefs = {}
+    api.SetItemRef = function(link)
+        client.itemRefs[#client.itemRefs + 1] = link
+    end
+    -- Always known, loaded or not: the equip slot is world.itemSlots'.
     api.C_Item.GetItemInfoInstant = function(itemID)
-        return itemID, "Trade Goods", "Elixir", "", 1, 7, 2
+        return itemID, "Trade Goods", "Elixir", world.itemSlots[itemID] or "", 1, 7, 2
     end
     api.C_Item.GetItemQualityColor = function()
         return 1, 1, 1, "ffffffff"
     end
-    api.C_Item.GetItemNameByID = function(itemID)
-        return "Item" .. itemID
+    api.C_Item.GetItemCount = function(itemID)
+        return client.bags and client.bags[itemID] or 0
     end
-    api.C_Item.GetItemInfo = function(itemID)
-        return "Item" .. itemID, "|cffffffff|Hitem:" .. itemID .. "|h[Item]|h|r"
-    end
+    api.INVTYPE_CHEST, api.INVTYPE_ROBE, api.INVTYPE_FEET, api.INVTYPE_HEAD = "Chest", "Chest", "Feet", "Head"
+    api.MenuResponse = { Open = 1, Refresh = 2, Close = 3, CloseAll = 4 }
+    -- What the client linked in chat, and whom it opened a whisper to.
     api.ChatFrameUtil.InsertLink = function(link)
         client.linked = link
     end
+    api.ChatFrameUtil.SendTell = function(name)
+        client.whispered = name
+    end
+    -- The game opens its profession window on one of our recipes.
+    api.ProfessionsUtil = {
+        OpenProfessionFrameToRecipe = function(recipeID)
+            client.openedRecipe = recipeID
+            return true
+        end,
+    }
     if world.communities then
         api.CommunitiesFrame = world.communities(client)
         api.COMMUNITIES_FRAME_DISPLAY_MODES = { ROSTER = { "MemberList" }, GUILD_INFO = { "GuildDetailsFrame" } }
@@ -1242,9 +1661,10 @@ function World:MakeEnv(client)
         return client.guildBankMoney or 0
     end
 
-    -- Trade and mail, driven by World:Trade and World:Mail.
+    -- Trade and mail, driven by World:Trade, World:Mail and World:TakeMail.
     api.ERR_TRADE_COMPLETE = "Trade complete."
-    api.ATTACHMENTS_MAX_SEND = 12
+    api.ERR_INV_FULL = "Inventory is full."
+    api.ATTACHMENTS_MAX_SEND, api.ATTACHMENTS_MAX_RECEIVE = 12, 16
     local function ItemLink(item)
         return item and ("|cffffffff|Hitem:%d::::::::|h[Item%d]|h|r"):format(item[1], item[1]) or nil
     end
@@ -1274,6 +1694,21 @@ function World:MakeEnv(client)
     api.GetTradePlayerItemLink = function(slot)
         return ItemLink(TradeSlot("mine", slot))
     end
+    api.GetTradeTargetItemInfo = function(slot)
+        local item = TradeSlot("theirs", slot)
+        if item then
+            return "Item" .. item[1], 3, item[2], 1, true, nil
+        end
+    end
+    api.GetTradeTargetItemLink = function(slot)
+        return ItemLink(TradeSlot("theirs", slot))
+    end
+    api.GetPlayerTradeMoney = function()
+        return client.trade and client.trade.myMoney or 0
+    end
+    api.GetTargetTradeMoney = function()
+        return client.trade and client.trade.theirMoney or 0
+    end
     api.GetSendMailItem = function(slot)
         local item = client.sendMail and client.sendMail[slot]
         if item then
@@ -1285,6 +1720,79 @@ function World:MakeEnv(client)
     end
     -- The world delivers it (World:Mail).
     api.SendMail = function() end
+    api.GetInboxNumItems = function()
+        return #client.inbox
+    end
+    api.GetInboxHeaderInfo = function(index)
+        local mail = client.inbox[index]
+        if mail then
+            return nil, nil, mail.from, "Subject", mail.money or 0, 0, 30, #mail.items, false, mail.returned == true, false, true, false
+        end
+    end
+    local function MailItem(index, slot)
+        local mail = client.inbox[index]
+        return mail and mail.items[slot] or nil
+    end
+    api.GetInboxItem = function(index, slot)
+        local item = MailItem(index, slot)
+        if item then
+            return "Item" .. item[1], item[1], 3, item[2], 1, true
+        end
+    end
+    api.GetInboxItemLink = function(index, slot)
+        return ItemLink(MailItem(index, slot))
+    end
+    -- The server answers a moment later: the items go to the bags (or the
+    -- bags are full), and a mail left empty is deleted.
+    -- what: "item" (one slot), "money" or "all".
+    local function Take(index, slot, what)
+        local mail = client.inbox[index]
+        if not mail then
+            return
+        end
+        world:Schedule(0.1, function()
+            if what ~= "money" then
+                if client.bagsFull then
+                    world:FireEvent(client, "UI_ERROR_MESSAGE", 2, api.ERR_INV_FULL)
+                    return
+                end
+                for i = slot or 1, slot or #mail.items do
+                    local item = mail.items[i]
+                    if item then
+                        client.bags = client.bags or {}
+                        client.bags[item[1]] = (client.bags[item[1]] or 0) + item[2]
+                        mail.items[i] = false
+                    end
+                end
+            end
+            if what ~= "item" then
+                client.money = (client.money or 0) + (mail.money or 0)
+                mail.money = 0
+            end
+            local left = (mail.money or 0) > 0
+            for _, item in ipairs(mail.items) do
+                left = left or item ~= false
+            end
+            if not left then
+                for i, other in ipairs(client.inbox) do
+                    if other == mail then
+                        table.remove(client.inbox, i)
+                        break
+                    end
+                end
+            end
+            world:FireEvent(client, "MAIL_INBOX_UPDATE")
+        end, client)
+    end
+    api.TakeInboxItem = function(index, slot)
+        Take(index, slot, "item")
+    end
+    api.TakeInboxMoney = function(index)
+        Take(index, nil, "money")
+    end
+    api.AutoLootMailItem = function(index)
+        Take(index, nil, "all")
+    end
     api._G = env
     api.ERR_CHAT_PLAYER_NOT_FOUND_S = "No player named '%s' is currently playing."
     api.YES, api.NO, api.NONE = "Yes", "No", "None"
@@ -1299,28 +1807,227 @@ function World:MakeEnv(client)
     end
     api.ChatFontNormal = {}
 
-    -- The bags in the bag slots, inventory slots 100 + bag (C_Container.ContainerIDToInventoryID).
-    api.GetInventoryItemLink = function(_, slot)
-        local bag = client.bagItems[slot - 100]
-        return bag and ("|cffffffff|Hitem:%d::::::::60:::::|h[Bag%d]|h|r"):format(bag, bag) or nil
+    -- The character ------------------------------------------------------------
+    api.UnitLevel = function()
+        return client.level
     end
-    -- Items are "loaded" once requested, as from the server.
+    api.UnitClass = function()
+        return H.CLASS_NAMES[client.classID], H.CLASS_FILES[client.classID], client.classID
+    end
+    api.UnitRace = function()
+        local race = H.RACES[client.raceID]
+        return race[2], race[1], client.raceID
+    end
+    api.UnitSex = function()
+        return client.sex
+    end
+    api.UnitFactionGroup = function()
+        return client.faction, client.faction
+    end
+    api.C_CreatureInfo = {
+        GetClassInfo = function(classID)
+            local file = H.CLASS_FILES[classID]
+            if not file then
+                return nil
+            end
+            return { className = (client.locale == "esES" and "Clase " or "") .. H.CLASS_NAMES[classID], classFile = file, classID = classID }
+        end,
+        GetRaceInfo = function(raceID)
+            local race = H.RACES[raceID]
+            return race and { raceName = race[2], clientFileString = race[1], raceID = raceID } or nil
+        end,
+    }
+    api.GetAverageItemLevel = function()
+        local itemLevel = client.itemLevel or 0
+        return itemLevel + 1, itemLevel, itemLevel
+    end
+    api.INVSLOT_FIRST_EQUIPPED, api.INVSLOT_LAST_EQUIPPED = 1, 19
+    -- The equipped items by slot (1 to 19); the bags in the bag slots are
+    -- inventory slots 100 + bag (C_Container.ContainerIDToInventoryID).
+    api.GetInventoryItemLink = function(_, slot)
+        if slot >= 100 then
+            local bag = client.bagItems[slot - 100]
+            return bag and ("|cffffffff|Hitem:%d::::::::60:::::|h[Bag%d]|h|r"):format(bag, bag) or nil
+        end
+        local item = client.gear[slot]
+        return item and item.link or nil
+    end
+    api.ItemLocation = {
+        CreateFromEquipmentSlot = function(_, slot)
+            return { slot = slot }
+        end,
+    }
+    api.C_Item.GetCurrentItemLevel = function(location)
+        local item = client.gear[location.slot]
+        return item and item.il or nil
+    end
+
+    -- Talents (see H.TREE) -----------------------------------------------------------
+    local tree = H.TREE
+    local function NodeByID(nodeID)
+        for _, node in ipairs(tree.nodes) do
+            if node[1] == nodeID then
+                return node
+            end
+        end
+        if nodeID == tree.hidden[1] then
+            return tree.hidden
+        end
+    end
+    local function ConfigOf(group)
+        return client.talents and client.talents.groups[group] and (500 + group) or nil
+    end
+    local function RanksOf(configID)
+        return client.talents and client.talents.groups[configID - 500] or {}
+    end
+    api.GetNumSpecGroups = function()
+        local count = 0
+        for _ in pairs(client.talents and client.talents.groups or {}) do
+            count = count + 1
+        end
+        return math.max(count, 1)
+    end
+    api.C_SpecializationInfo = {
+        GetActiveSpecGroup = function()
+            return client.talents and client.talents.active or 1
+        end,
+        GetCombatConfigIDForSpecGroup = function(group)
+            return ConfigOf(group)
+        end,
+    }
+    api.C_ClassTalents = {
+        GetActiveConfigID = function()
+            return ConfigOf(client.talents and client.talents.active or 1)
+        end,
+    }
+    api.Enum.TraitNodeType = { Single = 0, Tiered = 1, Selection = 2, SubTreeSelection = 3 }
+    api.C_Traits = {
+        GetConfigInfo = function(configID)
+            return { ID = configID, name = "Config " .. configID, treeIDs = { tree.id } }
+        end,
+        ConfigHasStagedChanges = function()
+            return client.talents ~= nil and client.talents.staged == true
+        end,
+        GetTreeNodes = function()
+            local ids = {}
+            for _, node in ipairs(tree.nodes) do
+                ids[#ids + 1] = node[1]
+            end
+            ids[#ids + 1] = tree.hidden[1]
+            return ids
+        end,
+        GetNodeInfo = function(configID, nodeID)
+            local node = NodeByID(nodeID)
+            if not node then
+                return { ID = 0 }
+            end
+            local rank = RanksOf(configID)[nodeID] or 0
+            local x, y = H.NodePosition(node)
+            return {
+                ID = nodeID, isVisible = node ~= tree.hidden, type = 0, posX = x, posY = y, maxRanks = node[5],
+                activeRank = rank, ranksPurchased = rank, currentRank = rank, groupIDs = { 1, tree.tabs[node[2]].groupID },
+                entryIDs = { nodeID * 10 }, activeEntry = { entryID = nodeID * 10, rank = rank },
+            }
+        end,
+        GetEntryInfo = function(_, entryID)
+            return { definitionID = entryID + 1, maxRanks = 5 }
+        end,
+        GetDefinitionInfo = function(definitionID)
+            return { spellID = 40000 + (definitionID - 1) / 10 }
+        end,
+        GetGroupDisplayInfoByTreeID = function()
+            local list = {}
+            for i, tab in ipairs(tree.tabs) do
+                list[i] = { groupID = tab.groupID, treeID = tree.id, displayName = tab.name, icon = i, orderIndex = i }
+            end
+            return list
+        end,
+        GetGroupCurrencyInfo = function(configID, groupIDs)
+            local list = {}
+            for _, groupID in ipairs(groupIDs) do
+                local spent = 0
+                for nodeID, rank in pairs(RanksOf(configID)) do
+                    local node = NodeByID(nodeID)
+                    if node and tree.tabs[node[2]].groupID == groupID then
+                        spent = spent + rank
+                    end
+                end
+                list[#list + 1] = { traitNodeGroupID = groupID, currencyInfos = { { spent = spent, quantity = 0 } } }
+            end
+            return list
+        end,
+        GetTreeCurrencyInfo = function()
+            return { { quantity = client.talents and client.talents.unspent or 0, spent = 0 } }
+        end,
+    }
+
+    -- Items --------------------------------------------------------------------
+    -- A client has an item loaded, as a game that has seen it, but for those
+    -- it cannot have seen yet:
+    -- * the items in world.unloaded, which no client has;
+    -- * the items only other characters carry (their gear and containers),
+    --   which it knows of only from addon data.
+    -- C_Item.RequestLoadItemDataByID loads such an item half a second later,
+    -- with ITEM_DATA_LOAD_RESULT. Loaded, an item is an epic (quality 4),
+    -- named "Item <ID>" by C_Item.GetItemInfo and "Item<ID>" by
+    -- C_Item.GetItemNameByID (each form is the one some addon's tests read).
+    client.itemsLoaded = client.itemsLoaded or {} -- [itemID] = true once requested
+    local function Carries(character, itemID)
+        for _, item in pairs(character.gear) do
+            if tonumber(tostring(item.link):match("item:(%d+)")) == itemID then
+                return true
+            end
+        end
+        for _, container in pairs(character.containers) do
+            for _, item in pairs(container) do
+                if type(item) == "table" and item[1] == itemID then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+    local function ItemLoaded(itemID)
+        if world.unloaded[itemID] then
+            return false
+        end
+        if client.itemsLoaded[itemID] or Carries(client, itemID) then
+            return true
+        end
+        for _, other in ipairs(world.clients) do
+            if other ~= client and Carries(other, itemID) then
+                return false
+            end
+        end
+        return true
+    end
+    local function ItemID(item)
+        return tonumber(tostring(item):match("item:(%d+)") or item)
+    end
     api.C_Item.RequestLoadItemDataByID = function(itemID)
-        world.itemsLoaded = world.itemsLoaded or {}
-        world.itemsLoaded[client.name .. ":" .. itemID] = true
+        itemID = ItemID(itemID)
+        if itemID and not ItemLoaded(itemID) then
+            world:Schedule(0.5, function()
+                world.unloaded[itemID] = nil
+                client.itemsLoaded[itemID] = true
+                world:FireEvent(client, "ITEM_DATA_LOAD_RESULT", itemID, true)
+            end, client)
+        end
     end
     api.C_Item.GetItemInfo = function(item)
-        local itemID = tonumber(tostring(item):match("item:(%d+)") or item)
-        if not (world.itemsLoaded and world.itemsLoaded[client.name .. ":" .. tostring(itemID)]) then
+        local itemID = ItemID(item)
+        if not itemID or not ItemLoaded(itemID) then
             return nil
         end
         return "Item " .. itemID, "|cffa335ee|Hitem:" .. itemID .. "|h[Item]|h|r", 4
     end
-    api.C_Item.GetItemNameByID = function()
-        return nil
+    api.C_Item.GetItemNameByID = function(itemID)
+        itemID = ItemID(itemID)
+        return itemID and ItemLoaded(itemID) and "Item" .. itemID or nil
     end
-    api.C_Item.GetItemQualityByID = function()
-        return nil
+    api.C_Item.GetItemQualityByID = function(itemID)
+        itemID = ItemID(itemID)
+        return itemID and ItemLoaded(itemID) and 4 or nil
     end
     -- Stacks of 20, but for the items given in world.maxStacks.
     api.C_Item.GetItemMaxStackSizeByID = function(itemID)
@@ -1328,6 +2035,206 @@ function World:MakeEnv(client)
     end
 
     return env
+end
+
+-- JSON reading (independent of the addon's writer) -----------------------------------
+
+local NULL = setmetatable({}, { __tostring = function() return "null" end })
+H.NULL = NULL
+
+-- Decodes JSON text strictly; raises on anything invalid. Objects become
+-- tables with their keys in _order; null becomes H.NULL.
+function H.DecodeJSON(text)
+    local pos = 1
+    local function Fail(message)
+        error(("JSON error at %d: %s (near %q)"):format(pos, message, text:sub(pos, pos + 20)), 0)
+    end
+    local function Skip()
+        pos = text:find("[^ \t\r\n]", pos) or #text + 1
+    end
+    local Value
+    local function Codepoint(code)
+        if code < 0x80 then
+            return string.char(code)
+        elseif code < 0x800 then
+            return string.char(0xC0 + math.floor(code / 64), 0x80 + code % 64)
+        elseif code < 0x10000 then
+            return string.char(0xE0 + math.floor(code / 4096), 0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
+        end
+        return string.char(0xF0 + math.floor(code / 262144), 0x80 + math.floor(code / 4096) % 64, 0x80 + math.floor(code / 64) % 64, 0x80 + code % 64)
+    end
+    local function String()
+        pos = pos + 1
+        local out = {}
+        while true do
+            local c = text:sub(pos, pos)
+            if c == "" then
+                Fail("unterminated string")
+            elseif c == '"' then
+                pos = pos + 1
+                return table.concat(out)
+            elseif c == "\\" then
+                local e = text:sub(pos + 1, pos + 1)
+                local simple = ({ ['"'] = '"', ["\\"] = "\\", ["/"] = "/", b = "\b", f = "\f", n = "\n", r = "\r", t = "\t" })[e]
+                if simple then
+                    out[#out + 1] = simple
+                    pos = pos + 2
+                elseif e == "u" then
+                    local hex = text:sub(pos + 2, pos + 5)
+                    if not hex:find("^%x%x%x%x$") then
+                        Fail("bad \\u escape")
+                    end
+                    out[#out + 1] = Codepoint(tonumber(hex, 16))
+                    pos = pos + 6
+                else
+                    Fail("bad escape")
+                end
+            elseif c:byte() < 32 then
+                Fail("control character in string")
+            else
+                out[#out + 1] = c
+                pos = pos + 1
+            end
+        end
+    end
+    function Value()
+        Skip()
+        local c = text:sub(pos, pos)
+        if c == "{" then
+            pos = pos + 1
+            local object = { _order = {} }
+            Skip()
+            if text:sub(pos, pos) == "}" then
+                pos = pos + 1
+                return object
+            end
+            while true do
+                Skip()
+                if text:sub(pos, pos) ~= '"' then
+                    Fail("expected a key")
+                end
+                local key = String()
+                Skip()
+                if text:sub(pos, pos) ~= ":" then
+                    Fail("expected ':'")
+                end
+                pos = pos + 1
+                if object[key] ~= nil then
+                    Fail("duplicate key " .. key)
+                end
+                object[key] = Value()
+                object._order[#object._order + 1] = key
+                Skip()
+                local d = text:sub(pos, pos)
+                pos = pos + 1
+                if d == "}" then
+                    return object
+                elseif d ~= "," then
+                    Fail("expected ',' or '}'")
+                end
+            end
+        elseif c == "[" then
+            pos = pos + 1
+            local array = {}
+            Skip()
+            if text:sub(pos, pos) == "]" then
+                pos = pos + 1
+                return array
+            end
+            while true do
+                array[#array + 1] = Value()
+                Skip()
+                local d = text:sub(pos, pos)
+                pos = pos + 1
+                if d == "]" then
+                    return array
+                elseif d ~= "," then
+                    Fail("expected ',' or ']'")
+                end
+            end
+        elseif c == '"' then
+            return String()
+        elseif text:sub(pos, pos + 3) == "true" then
+            pos = pos + 4
+            return true
+        elseif text:sub(pos, pos + 4) == "false" then
+            pos = pos + 5
+            return false
+        elseif text:sub(pos, pos + 3) == "null" then
+            pos = pos + 4
+            return NULL
+        else
+            local number = text:match("^-?%d+%.?%d*[eE]?[-+]?%d*", pos)
+            if not number or number == "" or number == "-" then
+                Fail("unexpected character")
+            end
+            pos = pos + #number
+            return tonumber(number) or Fail("bad number")
+        end
+    end
+    local value = Value()
+    Skip()
+    if pos <= #text then
+        Fail("text after the value")
+    end
+    return value
+end
+
+-- Saved variables files ---------------------------------------------------------------
+
+-- A string as a Lua literal. style "wow" escapes like the game's writer
+-- (backslash, quote, \n, \r, other control bytes as \ddd); "q" uses Lua's %q.
+function H.LuaString(text, style)
+    if style == "q" then
+        return ("%q"):format(text)
+    end
+    return '"' .. text:gsub('[%c"\\]', function(c)
+        local named = ({ ["\\"] = "\\\\", ['"'] = '\\"', ["\n"] = "\\n", ["\r"] = "\\r" })[c]
+        return named or ("\\%03d"):format(c:byte())
+    end) .. '"'
+end
+
+local function Serialize(value, indent, style, out)
+    local kind = type(value)
+    if kind == "string" then
+        out[#out + 1] = H.LuaString(value, style)
+    elseif kind == "number" or kind == "boolean" then
+        out[#out + 1] = tostring(value)
+    elseif kind == "table" then
+        out[#out + 1] = "{\n"
+        local keys = {}
+        for key in pairs(value) do
+            keys[#keys + 1] = key
+        end
+        table.sort(keys, function(a, b)
+            if type(a) ~= type(b) then
+                return type(a) < type(b)
+            end
+            return a < b
+        end)
+        for _, key in ipairs(keys) do
+            out[#out + 1] = indent .. "\t[" .. (type(key) == "string" and H.LuaString(key, style) or tostring(key)) .. "] = "
+            Serialize(value[key], indent .. "\t", style, out)
+            out[#out + 1] = ",\n"
+        end
+        out[#out + 1] = indent .. "}"
+    else
+        out[#out + 1] = "nil"
+    end
+end
+
+-- Writes variables { { name, value }, ... } the way the client writes a
+-- saved variables file.
+function H.WriteSavedVariables(path, variables, style)
+    local out = {}
+    for _, variable in ipairs(variables) do
+        out[#out + 1] = "\n" .. variable[1] .. " = "
+        Serialize(variable[2], "", style, out)
+        out[#out + 1] = "\n"
+    end
+    local file = assert(io.open(path, "wb"))
+    file:write(table.concat(out))
+    file:close()
 end
 
 return H

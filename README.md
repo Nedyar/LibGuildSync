@@ -80,9 +80,36 @@ fields:
 At `ADDON_LOADED` call `ns.Data.Load()`, at `PLAYER_LOGIN`
 `LibGuildSync.Start(ns)`, and at `PLAYER_LOGOUT`
 `ns.Data.PackForSave(ns.db)`. Change the player's own record through
-`ns.Data.GetOwnRecord(true)` and `ns.Data.TouchOwn(record)`, which announces
-it. Events reach the addon through `ns.On`: `GuildChanged`, `RosterUpdated`,
-`DataChanged`, `RecordChanged`, `OwnChanged`, `TargetOffline`.
+`ns.Data.GetOwnRecord(true)` and `ns.Data.TouchOwn(record, kind)`, which
+announces it (`kind`, optional, is a short text of the addon's own that
+says what changed). Events reach the addon through `ns.On`: `GuildChanged`,
+`RosterUpdated`, `DataChanged`, `RecordChanged`, `OwnChanged`,
+`TargetOffline`.
+
+### Going further (0.2.0 and later)
+
+- **Quick changes**: `ns.Sync.QUICK_KINDS[kind] = true` announces changes
+  of that kind within seconds instead of once things are quiet.
+- **Shorter messages**: `ns.Sync.WriteOwnChange(record, state, pending)`
+  returns a message for the changes waiting (`pending[kind] = true`;
+  `state.sentT` is the time of the record last announced), started with
+  `ns.Sync.Begin(type)`, or nil to send the whole record.
+- **Message types of its own**: `ns.Sync.handlers[type] =
+  function(reader, sender, guildKey, protocol)`, `type` being one byte
+  other than `UHOMQRE`.
+- **Older protocols**: members on a protocol in `legacy` are heard only for
+  the types in `ns.Sync.LEGACY_TYPES` (the record announcements, `U`, by
+  default); nobody answers their hellos, which come in a protocol they
+  could not read the answers of.
+- **Test messages**: with `probe = "0"` (a protocol character of their own)
+  in the configuration, `ns.Comm.SendProbe(text, channel, target)` sends one
+  at once and returns what the server answered, and
+  `ns.Comm.probeHandler(text, channel, sender)` gets them, ours included.
+- **A saved form of its own**, for an addon that saved its records another
+  way before it used the library: `ns.Data.UpgradeSaved(db)` (an older form
+  brought up to date before it is checked), `ns.Data.SaveRecord(guid,
+  record)` and `ns.Data.LoadRecord(saved, key)` (returns guid, record).
+- `ns.Roster.OnlineCount()`: how many members are online.
 
 ## Tests
 
@@ -95,7 +122,11 @@ lua5.1 Tests\run.lua . Tests
 They load the library and Sync Fixture (`Tests/SyncFixture`, a minimal
 addon built on it) into simulated clients that talk through a simulated
 server. The harness (`Tests/harness.lua`) is shared: each guild addon's
-tests load it from the `LibGuildSync` folder next to theirs.
+tests load it from the `LibGuildSync` folder next to theirs. It simulates
+what those addons read from the game (the roster, professions, talents,
+gear, bags, bank, trades and mail), and `H.Release(tag)` extracts an
+addon's earlier release from its git tag, so a test can put members on
+that release in the same guild as members on the current code.
 
 ## Releasing
 

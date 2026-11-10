@@ -36,7 +36,12 @@
 --   optionally Data.CarryMissing(kept, other) and Data.AdoptOwn(own, record)
 --       (what a kept copy takes from another; true if it took any),
 --       Data.NewOwnRecord(), Data.SanitizeExtra(clean, saved),
---       Data.PackExtra(db) and Data.OnPrune(guild, present).
+--       Data.PackExtra(db) and Data.OnPrune(guild, present, now);
+--   and, for an addon that saved its records its own way before it used
+--       the library, Data.UpgradeSaved(db) (an older saved form brought up
+--       to date, in place, before it is checked), Data.SaveRecord(guid,
+--       record) (what is saved for a record) and Data.LoadRecord(saved, key)
+--       (guid, record from what was saved under key).
 local Lib = LibGuildSync
 
 function Lib.NewStore(ns)
@@ -186,7 +191,20 @@ function Lib.NewStore(ns)
 
     -- Records are saved packed (see Data.PackForSave): the client writes
     -- each number of a plain table on its own line, ten times the size.
-    local function UnpackRecord(saved)
+    -- An addon may save them its own way (Data.SaveRecord, Data.LoadRecord).
+    local packedForms = setmetatable({}, { __mode = "k" })
+
+    local function PackRecord(guid, record)
+        if Data.SaveRecord then
+            return Data.SaveRecord(guid, record)
+        end
+        return { b = Pack.ToBase64(Pack.RecordString(guid, record)), seen = record.seen, fh = record.fh }
+    end
+
+    local function UnpackRecord(saved, key)
+        if Data.LoadRecord then
+            return Data.LoadRecord(saved, key)
+        end
         if type(saved) ~= "table" or type(saved.b) ~= "string" then
             return nil
         end
@@ -211,13 +229,16 @@ function Lib.NewStore(ns)
             end
             return clean
         end
+        if Data.UpgradeSaved then
+            Data.UpgradeSaved(db)
+        end
         if type(db.guilds) == "table" then
             for guildKey, guild in pairs(db.guilds) do
                 if IsGuildKey(guildKey) and type(guild) == "table" then
                     local cleanGuild = { seen = type(guild.seen) == "number" and guild.seen or 0, members = {} }
                     if type(guild.members) == "table" then
                         for key, saved in pairs(guild.members) do
-                            local guid, record = UnpackRecord(saved)
+                            local guid, record = UnpackRecord(saved, key)
                             local cleanRecord = guid == key and Data.IsGUID(guid) and Data.CleanRecord(record)
                             if cleanRecord then
                                 MergeCopies(cleanGuild.members, guid, cleanRecord)
@@ -257,8 +278,11 @@ function Lib.NewStore(ns)
     function Data.PackForSave(db)
         for _, guild in pairs(db.guilds) do
             for guid, record in pairs(guild.members) do
-                if record.b == nil then
-                    guild.members[guid] = { b = Pack.ToBase64(Pack.RecordString(guid, record)), seen = record.seen, fh = record.fh }
+                -- Packing twice (a second logout event) changes nothing.
+                if not packedForms[record] then
+                    local saved = PackRecord(guid, record)
+                    packedForms[saved] = true
+                    guild.members[guid] = saved
                 end
             end
         end
@@ -405,8 +429,9 @@ function Lib.NewStore(ns)
         return record
     end
 
-    -- Stamps a change to our own record.
-    function Data.TouchOwn(record)
+    -- Stamps a change to our own record. kind (optional) says what changed,
+    -- for the addon's own ways of announcing it (see Sync.lua).
+    function Data.TouchOwn(record, kind)
         local now = Lib.Now()
         record.t = math.max(now, (record.t or 0) + 1)
         record.av = ns.VERSION_NUM
@@ -417,7 +442,7 @@ function Lib.NewStore(ns)
         local guild = Data.CurrentGuild()
         Data.Changed(guild)
         ns.Fire("RecordChanged", ns.playerGUID, record)
-        ns.Fire("OwnChanged")
+        ns.Fire("OwnChanged", kind)
     end
 
     -- What this account keeps for the current character (never shared).

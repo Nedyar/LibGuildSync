@@ -12,7 +12,7 @@
 ## Notes-zhCN: 公会插件的共用代码：让所有公会成员的数据保持一致。
 ## Notes-zhTW: 公會插件的共用程式碼：讓所有公會成員的資料保持一致。
 ## Author: Nedyar
-## Version: 0.1.0
+## Version: 0.2.0
 ## IconTexture: Interface\Icons\INV_Misc_Gear_01
 
 Locales\Locales.lua

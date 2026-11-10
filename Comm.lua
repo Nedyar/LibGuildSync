@@ -14,6 +14,9 @@
 -- Each addon sends on its own prefix (ns.PREFIX, heard on every prefix in
 -- ns.LISTEN) with its own protocol (ns.PROTOCOL); messages of an older
 -- protocol it still reads (ns.LEGACY) reach its handler with that protocol.
+-- An addon may also have test messages (ns.PROBE, another protocol
+-- character): Comm.SendProbe sends one at once, outside the queue, and
+-- Comm.probeHandler(text, channel, sender) gets them, our own included.
 --
 -- The server allows each prefix about 10 messages at once and 1 more per
 -- second, and refuses addon messages during boss encounters, Mythic+ runs
@@ -27,7 +30,7 @@ function Lib.NewComm(ns)
 
     local Comm = {}
 
-    local PROTOCOL, LEGACY = ns.PROTOCOL, ns.LEGACY
+    local PROTOCOL, LEGACY, PROBE = ns.PROTOCOL, ns.LEGACY, ns.PROBE
     local HEADER = 6
     local CHUNK = 255 - HEADER
     local MAX_PARTS = 64
@@ -297,6 +300,25 @@ function Lib.NewComm(ns)
         return true
     end
 
+    -- A test message (ns.PROBE), sent at once: what the server answers is
+    -- what a probe wants to know, as text.
+    function Comm.SendProbe(text, channel, target)
+        if target then
+            recentWhispers[target] = GetTime()
+        end
+        local ok, result = pcall(C_ChatInfo.SendAddonMessage, ns.PREFIX, PROBE .. text, channel, target)
+        if not ok then
+            return "error: " .. tostring(result)
+        end
+        return tostring(ns.Plain(result))
+    end
+
+    local function OnProbe(text, channel, sender)
+        if Comm.probeHandler then
+            Comm.probeHandler(text:sub(2), channel, sender)
+        end
+    end
+
     -- Receiving ------------------------------------------------------------------------
 
     local pending = {}      -- [sender] = { [id] = { parts, got, last, compressed, time, bytes } }
@@ -358,6 +380,10 @@ function Lib.NewComm(ns)
 
     local function OnChunk(text, channel, sender)
         local protocol = text:sub(1, 1)
+        if PROBE and protocol == PROBE then
+            OnProbe(text, channel, sender)
+            return
+        end
         if protocol ~= PROTOCOL and not LEGACY[protocol] then
             if not newerProtocolNoticed and protocol > PROTOCOL then
                 newerProtocolNoticed = true
@@ -472,7 +498,11 @@ function Lib.NewComm(ns)
             -- and refuses whispers to "Name Surname-Realm".)
             local from = sender
             if ns.IsMe(from) then
-                -- Our own GUILD messages come back to us.
+                -- Our own GUILD messages come back to us. Test messages are
+                -- wanted.
+                if PROBE and text:sub(1, 1) == PROBE then
+                    OnProbe(text, channel, from)
+                end
                 return
             end
             -- Anyone can whisper on our prefix: only guild members are heard,

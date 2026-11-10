@@ -19,7 +19,20 @@
 -- When everybody already agrees, logging in costs a single message.
 --
 -- The addon tells it when its own record is ready to be announced
--- (Sync.OwnReady) and announces changes with ns.Fire("OwnChanged").
+-- (Sync.OwnReady) and announces changes with ns.Fire("OwnChanged", kind),
+-- kind being any short text of its own (nil for a change of any kind).
+-- Optionally it adds:
+--   Sync.QUICK_KINDS[kind] = true: changes announced within seconds, not
+--       once things are quiet;
+--   Sync.WriteOwnChange(record, state, pending): a shorter message for the
+--       changes waiting (pending[kind] = true; state.sentT is the time of
+--       the record last announced), made with Sync.Begin(type), or nil for
+--       the whole record (U);
+--   Sync.handlers[type] = function(reader, sender, guildKey, protocol): its
+--       own message types (one byte each, other than "UHOMQRE");
+--   Sync.LEGACY_TYPES[type] = true: the types heard from members on an
+--       older protocol (ns.LEGACY), U only by default, since they cannot
+--       read our replies.
 local Lib = LibGuildSync
 
 function Lib.NewSync(ns)
@@ -32,6 +45,7 @@ function Lib.NewSync(ns)
 
     local BROADCAST_QUIET = 30     -- own changes are sent once quiet this long...
     local BROADCAST_MAX_WAIT = 120 -- ...or this long after the first one
+    local QUICK_QUIET = 2          -- ...or this long, for the addon's quick kinds
     local LOGIN_DELAY = { 8, 15 }  -- spreads the hellos of a login wave
     local HELLO_INTERVAL = 45 * 60 -- a hello now and then catches anything missed
     local HELLO_TIMEOUT = 15       -- how long a newcomer waits for an offer
@@ -51,6 +65,11 @@ function Lib.NewSync(ns)
     local rounds = 0
     local newerVersionNoticed = false
     local nextSessionID = math.random(1, 65535)
+    local pending = {}             -- kinds of our changes not announced yet
+    local quick = false            -- one of them is a quick kind
+
+    Sync.QUICK_KINDS = {}
+    Sync.LEGACY_TYPES = { [T_UPDATE] = true }
 
     -- Our own record has been brought up to date, so what we announce is
     -- current. The addon replaces this.
@@ -70,6 +89,7 @@ function Lib.NewSync(ns)
         writer:UInt(Pack.Hash(Roster.guildKey or ""))
         return writer
     end
+    Sync.Begin = Begin
 
     local function NoteVersion(version)
         if not newerVersionNoticed and type(version) == "number" and version > ns.VERSION_NUM and version < 1000000 then
@@ -112,18 +132,27 @@ function Lib.NewSync(ns)
         local state = Data.OwnState()
         local fingerprint = Data.Fingerprint(ns.playerGUID, record)
         if state.sentFP == fingerprint and state.sentGuild == guildKey then
+            wipe(pending)
+            quick = false
             return
         end
-        local writer = Begin(T_UPDATE)
-        Pack.WriteRecord(writer, ns.playerGUID, record)
+        local writer = Sync.WriteOwnChange and next(pending) and Sync.WriteOwnChange(record, state, pending)
+        if not writer then
+            writer = Begin(T_UPDATE)
+            Pack.WriteRecord(writer, ns.playerGUID, record)
+        end
         if Comm.Send(writer:Result(), "GUILD", nil, "own") then
-            state.sentFP, state.sentGuild = fingerprint, guildKey
+            state.sentFP, state.sentT, state.sentGuild = fingerprint, record.t, guildKey
+            wipe(pending)
+            quick = false
             ns.Debug("announced our character")
         end
     end
 
-    local function OnOwnChanged()
-        ns.Debounce("BroadcastOwn", BROADCAST_QUIET, Sync.BroadcastOwn, BROADCAST_MAX_WAIT)
+    local function OnOwnChanged(kind)
+        pending[kind or "U"] = true
+        quick = quick or Sync.QUICK_KINDS[kind] == true
+        ns.Debounce("BroadcastOwn", quick and QUICK_QUIET or BROADCAST_QUIET, Sync.BroadcastOwn, BROADCAST_MAX_WAIT)
     end
 
     -- Sessions -------------------------------------------------------------------
@@ -511,6 +540,8 @@ function Lib.NewSync(ns)
         end
     end
 
+    Sync.handlers = handlers
+
     -- protocol: the one the message came in, for records of an older one.
     local function OnMessage(raw, sender, _, protocol)
         local guildKey = Roster.guildKey
@@ -518,7 +549,11 @@ function Lib.NewSync(ns)
             return
         end
         local reader = Pack.Reader(raw)
-        local handler = handlers[reader:Byte()]
+        local kind = reader:Byte()
+        local handler = handlers[kind]
+        if protocol and protocol ~= ns.PROTOCOL and not Sync.LEGACY_TYPES[kind] then
+            return
+        end
         if handler and reader:UInt() == Pack.Hash(guildKey) then
             handler(reader, sender, guildKey, protocol)
         end

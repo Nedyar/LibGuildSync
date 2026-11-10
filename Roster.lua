@@ -83,6 +83,17 @@ function Roster.NameOf(guid)
     return member and member.n
 end
 
+-- How many members are online.
+function Roster.OnlineCount()
+    local count = 0
+    for _, member in pairs(Roster.members) do
+        if member.on then
+            count = count + 1
+        end
+    end
+    return count
+end
+
 local function UpdateGuildKey()
     local key
     if IsInGuild() then

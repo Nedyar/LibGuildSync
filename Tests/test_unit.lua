@@ -102,6 +102,41 @@ H.check(loaded.guilds["Test Guild"].members[GUID] == nil, "an unreadable saved r
 H.check(loaded.guilds["Test Guild"].members["Player-1-0000000F"] == nil, "a record saved under another GUID is dropped")
 H.check(next(Data.Sanitize("nonsense").guilds) == nil, "a broken database starts empty")
 H.check(solo.env.SyncFixtureDB == ns.db, "the addon's saved variable is its database")
+local twice = H.DeepCopy(ns.db)
+Data.PackForSave(twice)
+local first = twice.guilds["Test Guild"].members[GUID].b
+Data.PackForSave(twice)
+H.eq(twice.guilds["Test Guild"].members[GUID].b, first, "packing twice changes nothing")
+
+-- An addon that saved its records its own way before it used the library.
+Data.UpgradeSaved = function(db)
+    -- Its first form knew guilds as "Name-Realm".
+    if db.schema == 0 then
+        db.guilds = { ["Test Guild"] = db.guilds["Test Guild-Old Realm"] }
+    end
+end
+Data.SaveRecord = function(guid, saved)
+    return { v = saved.v, t = saved.t, list = table.concat(saved.k or {}, ","), seen = saved.seen }
+end
+Data.LoadRecord = function(saved, key)
+    local list = {}
+    for id in tostring(saved.list or ""):gmatch("%d+") do
+        list[#list + 1] = tonumber(id)
+    end
+    return key, { v = saved.v, t = saved.t, k = list, seen = saved.seen }
+end
+local own = H.DeepCopy(ns.db)
+Data.PackForSave(own)
+H.eq(own.guilds["Test Guild"].members[GUID].list, "1,2,3", "an addon may save records its own way")
+loaded = Data.Sanitize(own)
+H.check(ns.Same(loaded.guilds["Test Guild"].members[GUID].k, { 1, 2, 3 }), "and read them back")
+own.schema, own.guilds = 0, { ["Test Guild-Old Realm"] = own.guilds["Test Guild"] }
+loaded = Data.Sanitize(own)
+H.check(loaded.guilds["Test Guild"] ~= nil and loaded.guilds["Test Guild"].members[GUID] ~= nil, "an older saved form is upgraded first")
+Data.UpgradeSaved, Data.SaveRecord, Data.LoadRecord = nil, nil, nil
+
+H.section("Roster")
+H.eq(ns.Roster.OnlineCount(), 1, "members online")
 
 H.section("Own record")
 local own = Data.GetOwnRecord(false)

@@ -3,7 +3,10 @@
 -- known), which the tests set with ns.SetOwn.
 --
 -- Its protocol is "3" (SYNC_FIXTURE_PROTOCOL changes it for a client); it
--- still reads "2", whose records carry no list.
+-- still reads "2", whose records carry no list. A change of the note alone
+-- (kind "N") goes out as a short N message on top of the version it
+-- follows; a change of the list (kind "K") is announced within seconds.
+-- Its test messages (protocol "0") are kept in ns.pings.
 local ADDON_NAME, ns = ...
 ns.ADDON_NAME = ADDON_NAME
 ns.LOCALE = SYNC_FIXTURE_LOCALE or "enUS"
@@ -17,6 +20,7 @@ Lib.Attach(ns, {
     trial = SYNC_FIXTURE_TRIAL == true,
     protocol = SYNC_FIXTURE_PROTOCOL or "3",
     legacy = { ["2"] = true },
+    probe = "0",
     savedVariable = "SyncFixtureDB",
 })
 
@@ -101,12 +105,58 @@ function Data.AdoptOwn(own, record)
     return Data.CarryMissing(own, record)
 end
 
+-- Short messages -----------------------------------------------------------------------
+
+local Sync = ns.Sync
+local T_NOTE = string.byte("N")
+Sync.QUICK_KINDS.K = true
+Sync.LEGACY_TYPES[T_NOTE] = true
+
+local function Only(pending, kind)
+    for key in pairs(pending) do
+        if key ~= kind then
+            return false
+        end
+    end
+    return pending[kind] == true
+end
+
+function Sync.WriteOwnChange(record, state, pending)
+    if Only(pending, "N") and state.sentGuild == ns.Roster.guildKey and state.sentT and state.sentT < record.t then
+        local writer = Sync.Begin(T_NOTE)
+        writer:UInt(state.sentT)
+        writer:UInt(record.t)
+        writer:Str(record.v or "")
+        return writer
+    end
+end
+
+-- Applies only on top of the version it follows; otherwise the next sync
+-- brings the whole record.
+Sync.handlers[T_NOTE] = function(reader, sender, guildKey)
+    local previous, t, v = reader:UInt(), reader:UInt(), reader:Str(Pack.LIMITS.note)
+    local guild = Data.GetGuild(guildKey)
+    local owner = ns.Roster.GUIDOfSender(sender)
+    local record = guild and owner and guild.members[owner]
+    if not record or record.t ~= previous or t <= previous or t > Lib.Now() + 300 then
+        return
+    end
+    record.v, record.t, record.fh, record.seen = v, t, true, Lib.Now()
+    ns.notesApplied = (ns.notesApplied or 0) + 1
+    Data.Changed(guild)
+end
+
+ns.pings = {}
+ns.Comm.probeHandler = function(text, channel, sender)
+    ns.pings[#ns.pings + 1] = { text = text, channel = channel, sender = sender }
+end
+
 -- Our record ----------------------------------------------------------------------------
 
-function ns.SetOwn(v, k)
+function ns.SetOwn(v, k, kind)
     local record = Data.GetOwnRecord(true)
     record.v, record.k = v, k
-    Data.TouchOwn(record)
+    Data.TouchOwn(record, kind)
 end
 
 -- Stamped once the guild is known.

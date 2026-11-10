@@ -337,6 +337,7 @@ function Lib.Attach(ns, config)
     ns.LISTEN = { [ns.PREFIX] = true, [config.prefix] = true }
     ns.PROTOCOL = config.protocol
     ns.LEGACY = config.legacy or {}
+    ns.PROBE = config.probe
     ns.SAVED = config.savedVariable
     for _, name in ipairs(SHARED) do
         ns[name] = Lib[name]

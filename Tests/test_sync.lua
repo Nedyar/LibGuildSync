@@ -108,8 +108,6 @@ world:RunFor(5)
 old.ns.SetOwn("From protocol 2")
 world:RunFor(150)
 H.check(RecordOf(carol, old) ~= nil and RecordOf(carol, old).v == "From protocol 2", "records of an older protocol are read")
-H.check(Printed(old, "a guild member uses a newer version of Sync Fixture that this one cannot talk to"),
-    "a member on the older protocol is told to update")
 Errors(world, "older protocol")
 -- A newer version in the guild.
 printed = #carol.printed
@@ -117,6 +115,9 @@ alice.ns.VERSION_NUM = 10300
 alice.ns.SetOwn("From 1.3.0", { 1 })
 world:RunFor(150)
 H.check(Printed(carol, "a newer version of Sync Fixture (1.3.0) is in use in your guild", printed), "a newer version in the guild is noticed")
+-- Alice's announcement went out in the newer protocol.
+H.check(Printed(old, "a guild member uses a newer version of Sync Fixture that this one cannot talk to"),
+    "a member on the older protocol is told to update")
 -- Another language for the library's texts.
 local hans = world:NewClient("Hans Meyer", { globals = { SYNC_FIXTURE_LOCALE = "deDE" } })
 world:Login(hans)
@@ -126,3 +127,56 @@ hans.ns.Sync.SendHello(true)
 world:RunFor(30)
 H.check(not Printed(hans, "asking the guild", printed) and #hans.printed > printed, "the sync's messages come in the addon's language")
 Errors(world, "versions")
+
+H.section("Sync: the addon's own messages")
+world = H.NewWorld({ seed = 9, senderFormat = "short", strictWhispers = true })
+local ann = world:NewClient("Ann Lee")
+local ben = world:NewClient("Ben Fox")
+world:Login(ann)
+world:Login(ben)
+world:RunFor(60)
+ann.ns.SetOwn("First", { 1, 2 })
+world:RunFor(150)
+H.check(RecordOf(ben, ann) ~= nil and RecordOf(ben, ann).v == "First", "Ben has Ann's record")
+-- A change of the note alone goes out as the fixture's short N message.
+ann.ns.SetOwn("Second", { 1, 2 }, "N")
+world:RunFor(150)
+H.check(RecordOf(ben, ann).v == "Second" and ben.ns.notesApplied == 1, "a change of one kind goes out as the addon's own message")
+H.eq(RecordOf(ben, ann).t, RecordOf(ann, ann).t, "and brings the record to the same version")
+-- A note and something else: the whole record.
+ann.ns.SetOwn("Third", { 1, 2 }, "N")
+ann.ns.SetOwn("Third", { 1, 2, 5 })
+world:RunFor(150)
+H.check(RecordOf(ben, ann).v == "Third" and #RecordOf(ben, ann).k == 3 and ben.ns.notesApplied == 1,
+    "changes of several kinds go out as the whole record")
+-- A quick kind goes out within seconds.
+ann.ns.SetOwn("Third", { 1, 2, 5, 7 }, "K")
+world:RunFor(6)
+H.check(#RecordOf(ben, ann).k == 4, "a quick kind is announced within seconds")
+Errors(world, "own messages")
+
+H.section("Sync: test messages")
+H.eq(ann.ns.Comm.SendProbe("ping", "GUILD"), "0", "a test message goes out at once")
+world:RunFor(2)
+local heard = ben.ns.pings[#ben.ns.pings]
+H.check(heard ~= nil and heard.text == "ping" and heard.channel == "GUILD" and heard.sender == "Ann Lee", "it reaches the others' handler")
+H.check(#ann.ns.pings == 1 and ann.ns.pings[1].text == "ping", "and comes back to ours")
+H.check(RecordOf(ben, ann).v == "Third", "and is not taken for a record")
+Errors(world, "test messages")
+
+H.section("Sync: members on an older protocol")
+local olga = world:NewClient("Olga Old", { globals = { SYNC_FIXTURE_PROTOCOL = "2" } })
+world:Login(olga)
+world:RunFor(60)
+olga.ns.SetOwn("Old", nil)
+world:RunFor(150)
+H.check(RecordOf(ben, olga) ~= nil and RecordOf(ben, olga).v == "Old", "their records are read")
+local applied = ben.ns.notesApplied
+olga.ns.SetOwn("Old note", nil, "N")
+world:RunFor(150)
+H.check(RecordOf(ben, olga).v == "Old note" and ben.ns.notesApplied == applied + 1, "and the types the addon still hears from them")
+printed = #olga.printed
+olga.ns.Sync.SendHello(true)
+world:RunFor(60)
+H.check(Printed(olga, "nobody online has data you are missing", printed), "but nobody answers their hello, in a protocol they cannot read")
+Errors(world, "older protocol members")
