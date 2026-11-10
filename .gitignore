@@ -1,0 +1,21 @@
+# Data a running copy of the addon collects never belongs in the repository.
+# The game writes it to WTF\Account\<account>\SavedVariables, outside the
+# addon folder; these catch a copy that ends up here.
+WTF/
+SavedVariables/
+/LibGuildSync.lua
+*.lua.bak
+
+# Test output
+Tests/out/
+
+# Release packages
+*.zip
+
+# Editors and the operating system
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+__pycache__/

@@ -1,0 +1,34 @@
+## Interface: 16001
+## Title: LibGuildSync
+## Notes: Shared code of the guild addons (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts): it keeps their data the same for every guild member.
+## Notes-deDE: Gemeinsamer Code der Gildenaddons (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts): Er hält ihre Daten für alle Gildenmitglieder gleich.
+## Notes-esES: Código común de los addons de hermandad (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts): mantiene sus datos iguales para todos los miembros.
+## Notes-esMX: Código común de los addons de hermandad (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts): mantiene sus datos iguales para todos los miembros.
+## Notes-frFR: Code commun des add-ons de guilde (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts) : il garde leurs données identiques pour tous les membres.
+## Notes-itIT: Codice comune degli add-on di gilda (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts): mantiene i loro dati uguali per tutti i membri.
+## Notes-koKR: 길드 애드온(Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts)의 공용 코드: 모든 길드원의 데이터를 똑같이 유지합니다.
+## Notes-ptBR: Código comum dos addons de guilda (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts): mantém os dados deles iguais para todos os membros.
+## Notes-ruRU: Общий код гильдейских модификаций (Guild Professions & Recipes, Bot'tar Sync, Guild Bank Alts): поддерживает их данные одинаковыми у всех членов гильдии.
+## Notes-zhCN: 公会插件（Guild Professions & Recipes、Bot'tar Sync、Guild Bank Alts）的共用代码：让所有公会成员的数据保持一致。
+## Notes-zhTW: 公會插件（Guild Professions & Recipes、Bot'tar Sync、Guild Bank Alts）的共用程式碼：讓所有公會成員的資料保持一致。
+## Author: Nedyar
+## Version: 0.1.0
+## IconTexture: Interface\Icons\INV_Misc_Gear_01
+
+Locales\Locales.lua
+Locales\deDE.lua
+Locales\esES.lua
+Locales\frFR.lua
+Locales\itIT.lua
+Locales\koKR.lua
+Locales\ptBR.lua
+Locales\ruRU.lua
+Locales\zhCN.lua
+Locales\zhTW.lua
+
+Core.lua
+Pack.lua
+Roster.lua
+Store.lua
+Comm.lua
+Sync.lua

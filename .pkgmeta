@@ -1,0 +1,10 @@
+# CurseForge packager: it packages every tagged commit pushed to GitHub.
+# Files starting with a dot (.git, .github, this file...) are always left out.
+package-as: LibGuildSync
+
+ignore:
+    - Tests
+
+manual-changelog:
+    filename: CHANGELOG.md
+    markup-type: markdown

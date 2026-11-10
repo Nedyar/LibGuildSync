@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: Sync Fixture
+## Notes: A minimal addon on LibGuildSync, for the library's tests.
+## Version: 1.2.3
+## Dependencies: LibGuildSync
+## SavedVariables: SyncFixtureDB
+
+Core.lua

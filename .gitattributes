@@ -1,0 +1,3 @@
+# Text files use LF line endings, in the repository and in the working copy.
+* text=auto eol=lf
+*.png binary
