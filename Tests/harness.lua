@@ -911,6 +911,45 @@ function World:CloseGuildBank(client)
     self:FireEvent(client, "PLAYER_INTERACTION_MANAGER_FRAME_HIDE", H.GUILD_BANKER)
 end
 
+-- The guild vault's own log, kept by the server: world.vault.tabs (each
+-- { name, viewable, log = { { kind, name, itemID, count, tab1, tab2, at }... } })
+-- and world.vault.money ({ { kind, name, amount, at }... }), oldest first,
+-- at being the server's time (World:ServerTime). A client reads them after
+-- QueryGuildBankLog, like the game: the last H.VAULT_LOG_SIZE of each,
+-- with how long ago in years, months, days and hours. (Tests may move the
+-- server's time on by raising world.base.)
+H.VAULT_LOG_SIZE = 25
+
+-- What GetServerTime gives every client.
+function World:ServerTime()
+    return math.floor(self.base + self.now)
+end
+
+function World:Vault()
+    self.vault = self.vault or { tabs = {}, money = {} }
+    return self.vault
+end
+
+function World:VaultTab(name, viewable)
+    local tabs = self:Vault().tabs
+    tabs[#tabs + 1] = { name = name, viewable = viewable ~= false, log = {} }
+    return #tabs
+end
+
+-- kind: "deposit", "withdraw", "repair"... as GetGuildBankMoneyTransaction
+-- gives it.
+function World:VaultMoney(kind, name, amount)
+    local money = self:Vault().money
+    money[#money + 1] = { kind = kind, name = name, amount = amount, at = self:ServerTime() }
+end
+
+-- kind: "deposit", "withdraw" or "move" (to tab2).
+function World:VaultItem(tab, kind, name, itemID, count, tab2)
+    local log = self:Vault().tabs[tab].log
+    log[#log + 1] = { kind = kind, name = name, itemID = itemID, count = count, tab1 = kind == "move" and tab or nil, tab2 = tab2,
+        at = self:ServerTime() }
+end
+
 -- Trade and mail ------------------------------------------------------------------------
 
 -- A trade between two clients, each putting in items ({ { itemID, count }...
@@ -949,11 +988,12 @@ end
 
 -- Mail from a client to a name as typed, with items ({ { itemID, count }...
 -- by slot }). options.fail: the game refuses to send it; options.money:
--- the copper it carries. Sent, it lands in the inbox of the client of that
--- name, if there is one (World:TakeMail).
+-- the copper it carries; options.cod: the copper its recipient pays to
+-- take its items. Sent, it lands in the inbox of the client of that name,
+-- if there is one (World:TakeMail).
 function World:Mail(from, toName, items, options)
     options = options or {}
-    from.sendMail = items
+    from.sendMail, from.sendMoney, from.sendCOD = items, options.money, options.cod
     self:FireEvent(from, "MAIL_SEND_INFO_UPDATE")
     from.env.SendMail(toName, "Subject", "")
     if options.fail then
@@ -970,10 +1010,10 @@ function World:Mail(from, toName, items, options)
                     copy[#copy + 1] = { item[1], item[2] }
                 end
             end
-            to.inbox[#to.inbox + 1] = { from = from.name, items = copy, money = options.money }
+            to.inbox[#to.inbox + 1] = { from = from.name, items = copy, money = options.money, cod = options.cod }
         end
     end
-    from.sendMail = nil
+    from.sendMail, from.sendMoney, from.sendCOD = nil, nil, nil
 end
 
 -- Takes the items of a mail of the client's inbox: one slot, the money
@@ -1544,7 +1584,23 @@ function World:MakeEnv(client)
     end
     api.PlaySound = function() end
     api.SOUNDKIT = {}
-    api.GameTooltip = NewObject(client, "GameTooltip")
+    -- The tooltip keeps what it shows since its last SetOwner: _lines, the
+    -- title first, a double line as "left | right".
+    local tooltip = NewObject(client, "GameTooltip")
+    tooltip._lines = {}
+    tooltip.SetOwner = function(self)
+        self._text, self._lines = nil, {}
+    end
+    tooltip.SetText = function(self, text)
+        self._text, self._lines = text, { text }
+    end
+    tooltip.AddLine = function(self, text)
+        table.insert(self._lines, text)
+    end
+    tooltip.AddDoubleLine = function(self, left, right)
+        table.insert(self._lines, tostring(left) .. " | " .. tostring(right))
+    end
+    api.GameTooltip = tooltip
     api.GameTooltip_Hide = function() end
     api.RETRIEVING_ITEM_INFO = "Retrieving item information"
     api.NORMAL_FONT_COLOR = { GetRGB = function() return 1, 0.82, 0 end }
@@ -1636,12 +1692,166 @@ function World:MakeEnv(client)
             if not item then
                 return nil
             end
-            return { itemID = item[1], stackCount = item[2], hyperlink = ContainerItemLink(item), iconFileID = 7, quality = 2 }
+            return { itemID = item[1], stackCount = item[2], hyperlink = ContainerItemLink(item), iconFileID = 7, quality = 2,
+                isLocked = item.locked == true }
         end,
         ContainerIDToInventoryID = function(bag)
             return 100 + bag
         end,
     }
+
+    -- The cursor and moving items, as the game does it: a stack picked up
+    -- (or split off) stays in its slot, locked, until it is put down: in an
+    -- empty slot, onto a stack of the same item (as much as fits, the rest
+    -- staying where it was), back where it was, or, a whole stack, into the
+    -- mail being written. Put down in a slot, the move is the server's: the
+    -- slots look as they were until it answers (world.moveDelay seconds,
+    -- 0.4 by default), and their locks may clear before that
+    -- (world.unlockDelay, 0.2 by default; ITEM_LOCK_CHANGED). The server
+    -- refuses a move its slots no longer allow. client.moves counts the
+    -- moves.
+    local cursor -- { bag, slot, count }
+    local function MaxStack(itemID)
+        return world.maxStacks and world.maxStacks[itemID] or 20
+    end
+    -- The stack on the cursor put down on bag, slot (target: the stack there).
+    local function Ask(bag, slot, target)
+        local from, count = { bag = cursor.bag, slot = cursor.slot }, cursor.count
+        local source = Container(from.bag)[from.slot]
+        cursor = nil
+        client.moves = (client.moves or 0) + 1
+        if target then
+            target.locked = true
+        end
+        local unlocked, moved = false, nil
+        world:Schedule(world.unlockDelay or 0.2, function()
+            unlocked = true
+            for _, item in ipairs({ source, target or false, moved or false }) do
+                if item then
+                    item.locked = nil
+                end
+            end
+            world:FireEvent(client, "ITEM_LOCK_CHANGED", from.bag, from.slot)
+            world:FireEvent(client, "ITEM_LOCK_CHANGED", bag, slot)
+        end, client)
+        world:Schedule(world.moveDelay or 0.4, function()
+            local fromContainer, toContainer = Container(from.bag), Container(bag)
+            if not fromContainer or not toContainer or fromContainer[from.slot] ~= source or source[2] < count
+                    or toContainer[slot] ~= target then
+                return
+            end
+            if target then
+                count = math.min(count, MaxStack(target[1]) - target[2])
+                target[2] = target[2] + count
+                moved = target
+            else
+                -- A whole stack is the same item (its GUID) in another slot;
+                -- a part split off is a new one.
+                moved = { source[1], count, source[3], locked = not unlocked or nil, guid = count == source[2] and source.guid or nil }
+                toContainer[slot] = moved
+            end
+            source[2] = source[2] - count
+            if source[2] <= 0 then
+                fromContainer[from.slot] = nil
+            end
+            world:FireEvent(client, "BAG_UPDATE_DELAYED")
+        end, client)
+    end
+    api.C_Container.PickupContainerItem = function(bag, slot)
+        local container = Container(bag)
+        if not container or slot < 1 or slot > (container.size or 0) then
+            return
+        end
+        local item = container[slot]
+        if not cursor then
+            if item and not item.locked then
+                cursor = { bag = bag, slot = slot, count = item[2] }
+                item.locked = true
+            end
+            return
+        end
+        local source = Container(cursor.bag)[cursor.slot]
+        if not source then
+            cursor = nil
+        elseif bag == cursor.bag and slot == cursor.slot then
+            source.locked, cursor = nil, nil
+        elseif not item or (item[1] == source[1] and item[3] == source[3] and not item.locked) then
+            Ask(bag, slot, item)
+        end
+    end
+    api.C_Container.SplitContainerItem = function(bag, slot, count)
+        local container = Container(bag)
+        local item = container and container[slot]
+        if cursor or not item or item.locked or count < 1 or count >= item[2] then
+            return
+        end
+        cursor = { bag = bag, slot = slot, count = count }
+        item.locked = true
+    end
+    -- Each item of the containers has a GUID, given the first time it is
+    -- asked for (see ItemLocation below).
+    api.C_Item.GetItemGUID = function(location)
+        local container = location and location.bag and Container(location.bag)
+        local item = container and container[location.slot]
+        if not item then
+            return nil
+        end
+        if not item.guid then
+            world.itemGUIDs = (world.itemGUIDs or 0) + 1
+            item.guid = ("Item-1-0-%016X"):format(world.itemGUIDs)
+        end
+        return item.guid
+    end
+    api.C_Container.GetContainerNumFreeSlots = function(bag)
+        local container = Container(bag)
+        local free = 0
+        for slot = 1, container and container.size or 0 do
+            if not container[slot] then
+                free = free + 1
+            end
+        end
+        return free, 0
+    end
+    api.CursorHasItem = function()
+        return cursor ~= nil
+    end
+    api.ClearCursor = function()
+        if cursor then
+            local source = Container(cursor.bag)[cursor.slot]
+            if source then
+                source.locked = nil
+            end
+            cursor = nil
+        end
+    end
+    -- The stack on the cursor goes into the mail: into the slot given, or
+    -- the first free one. Not part of one, split off: it stays on the cursor.
+    api.ClickSendMailItemButton = function(index)
+        local bag, slot = cursor and cursor.bag, cursor and cursor.slot
+        local source = cursor and Container(bag)[slot]
+        if not source or cursor.count < source[2] then
+            return
+        end
+        client.sendMail = client.sendMail or {}
+        if not index then
+            for i = 1, api.ATTACHMENTS_MAX_SEND do
+                if not client.sendMail[i] then
+                    index = i
+                    break
+                end
+            end
+        end
+        if not index or client.sendMail[index] then
+            return
+        end
+        client.sendMail[index] = { source[1], source[2], source[3] }
+        Container(bag)[slot] = nil
+        cursor = nil
+        client.moves = (client.moves or 0) + 1
+        world:Schedule(0.1, function()
+            world:FireEvent(client, "MAIL_SEND_INFO_UPDATE")
+        end, client)
+    end
     api.C_Bank = {
         FetchPurchasedBankTabData = function()
             local tabs = {}
@@ -1659,6 +1869,91 @@ function World:MakeEnv(client)
     end
     api.GetGuildBankMoney = function()
         return client.guildBankMoney or 0
+    end
+    -- Money moved at the vault: the server answers a moment later, with the
+    -- money moved (if there is enough) and the vault's money log written.
+    local function MoveVaultMoney(sign, copper)
+        world:Schedule(0.2, function()
+            local vault, money = client.guildBankMoney or 0, client.money or 0
+            if copper <= 0 or (sign > 0 and vault < copper) or (sign < 0 and money < copper) then
+                return
+            end
+            client.guildBankMoney, client.money = vault - sign * copper, money + sign * copper
+            world:VaultMoney(sign > 0 and "withdraw" or "deposit", client.name, copper)
+            world:FireEvent(client, "PLAYER_MONEY")
+            world:FireEvent(client, "GUILDBANK_UPDATE_MONEY")
+        end, client)
+    end
+    api.WithdrawGuildBankMoney = function(copper)
+        MoveVaultMoney(1, copper)
+    end
+    api.DepositGuildBankMoney = function(copper)
+        MoveVaultMoney(-1, copper)
+    end
+
+    -- The guild vault's log (World:VaultTab, World:VaultMoney,
+    -- World:VaultItem): known to a client once asked for.
+    api.MAX_GUILDBANK_TABS = 8
+    local vaultAsked = {}
+    local function VaultLog(tab)
+        local vault = world.vault or { tabs = {}, money = {} }
+        if tab == api.MAX_GUILDBANK_TABS + 1 then
+            return vault.money
+        end
+        return vault.tabs[tab] and vault.tabs[tab].log or {}
+    end
+    -- The last ones, and how long ago as years, months, days and hours.
+    local function VaultEntry(tab, index)
+        if not vaultAsked[tab] then
+            return nil
+        end
+        local log = VaultLog(tab)
+        local entry = log[math.max(#log - H.VAULT_LOG_SIZE, 0) + index]
+        if not entry then
+            return nil
+        end
+        local hours = math.floor((world:ServerTime() - entry.at) / 3600)
+        local years = math.floor(hours / 8760)
+        hours = hours - years * 8760
+        local months = math.floor(hours / 720)
+        hours = hours - months * 720
+        local days = math.floor(hours / 24)
+        return entry, years, months, days, hours - days * 24
+    end
+    api.QueryGuildBankLog = function(tab)
+        world:Schedule(0.2, function()
+            vaultAsked[tab] = true
+            world:FireEvent(client, "GUILDBANKLOG_UPDATE")
+        end, client)
+    end
+    api.GetNumGuildBankTabs = function()
+        return world.vault and #world.vault.tabs or 0
+    end
+    api.GetGuildBankTabInfo = function(tab)
+        local info = world.vault and world.vault.tabs[tab]
+        if info then
+            return info.name, 133784, info.viewable, true, -1, -1, false
+        end
+    end
+    api.GetNumGuildBankTransactions = function(tab)
+        return vaultAsked[tab] and math.min(#VaultLog(tab), H.VAULT_LOG_SIZE) or 0
+    end
+    api.GetGuildBankTransaction = function(tab, index)
+        local entry, years, months, days, hours = VaultEntry(tab, index)
+        if entry then
+            local link = ("|cffffffff|Hitem:%d::::::::|h[Item%d]|h|r"):format(entry.itemID, entry.itemID)
+            return entry.kind, entry.name, link, entry.count, entry.tab1, entry.tab2, years, months, days, hours
+        end
+    end
+    api.GetNumGuildBankMoneyTransactions = function()
+        local tab = api.MAX_GUILDBANK_TABS + 1
+        return vaultAsked[tab] and math.min(#VaultLog(tab), H.VAULT_LOG_SIZE) or 0
+    end
+    api.GetGuildBankMoneyTransaction = function(index)
+        local entry, years, months, days, hours = VaultEntry(api.MAX_GUILDBANK_TABS + 1, index)
+        if entry then
+            return entry.kind, entry.name, entry.amount, years, months, days, hours
+        end
     end
 
     -- Trade and mail, driven by World:Trade, World:Mail and World:TakeMail.
@@ -1718,6 +2013,20 @@ function World:MakeEnv(client)
     api.GetSendMailItemLink = function(slot)
         return ItemLink(client.sendMail and client.sendMail[slot])
     end
+    api.GetSendMailMoney = function()
+        return client.sendMoney or 0
+    end
+    api.GetSendMailCOD = function()
+        return client.sendCOD or 0
+    end
+    -- The postage: 30 copper per item attached, 30 with none.
+    api.GetSendMailPrice = function()
+        local count = 0
+        for _ in pairs(client.sendMail or {}) do
+            count = count + 1
+        end
+        return 30 * math.max(count, 1)
+    end
     -- The world delivers it (World:Mail).
     api.SendMail = function() end
     api.GetInboxNumItems = function()
@@ -1726,7 +2035,8 @@ function World:MakeEnv(client)
     api.GetInboxHeaderInfo = function(index)
         local mail = client.inbox[index]
         if mail then
-            return nil, nil, mail.from, "Subject", mail.money or 0, 0, 30, #mail.items, false, mail.returned == true, false, true, false
+            return nil, nil, mail.from, "Subject", mail.money or 0, mail.cod or 0, 30, #mail.items, false, mail.returned == true,
+                false, true, false
         end
     end
     local function MailItem(index, slot)
@@ -1743,7 +2053,8 @@ function World:MakeEnv(client)
         return ItemLink(MailItem(index, slot))
     end
     -- The server answers a moment later: the items go to the bags (or the
-    -- bags are full), and a mail left empty is deleted.
+    -- bags are full), and a mail left empty is deleted. Taking an item pays
+    -- the mail's cash on delivery.
     -- what: "item" (one slot), "money" or "all".
     local function Take(index, slot, what)
         local mail = client.inbox[index]
@@ -1755,6 +2066,10 @@ function World:MakeEnv(client)
                 if client.bagsFull then
                     world:FireEvent(client, "UI_ERROR_MESSAGE", 2, api.ERR_INV_FULL)
                     return
+                end
+                if (mail.cod or 0) > 0 then
+                    client.money = (client.money or 0) - mail.cod
+                    mail.cod = 0
                 end
                 for i = slot or 1, slot or #mail.items do
                     local item = mail.items[i]
@@ -1855,6 +2170,9 @@ function World:MakeEnv(client)
     api.ItemLocation = {
         CreateFromEquipmentSlot = function(_, slot)
             return { slot = slot }
+        end,
+        CreateFromBagAndSlot = function(_, bag, slot)
+            return { bag = bag, slot = slot }
         end,
     }
     api.C_Item.GetCurrentItemLevel = function(location)
