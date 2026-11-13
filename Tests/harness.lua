@@ -1562,8 +1562,12 @@ function World:MakeEnv(client)
             rawset(scrollBox, "SetDataProvider", function(self, provider)
                 self._provider = provider
             end)
-            -- The element scrolled to, for the tests to check.
-            rawset(scrollBox, "ScrollToElementDataByPredicate", function(self, predicate)
+            -- The element scrolled to, for the tests to check. As in the game,
+            -- an offset that is not a number fails (it is added to).
+            rawset(scrollBox, "ScrollToElementDataByPredicate", function(self, predicate, alignment, offset, noInterpolation)
+                if offset ~= nil and type(offset) ~= "number" then
+                    error("attempt to perform arithmetic on local 'offset' (a " .. type(offset) .. " value)", 2)
+                end
                 self._scrolledTo = nil
                 for _, element in ipairs(self._provider and self._provider.elements or {}) do
                     if predicate(element) then
@@ -1579,7 +1583,9 @@ function World:MakeEnv(client)
             end)
         end,
     }
-    api.ScrollBoxConstants = { RetainScrollPosition = true }
+    -- As the game defines them (ScrollBoxConstants in Blizzard_SharedXML).
+    api.ScrollBoxConstants = { RetainScrollPosition = true, DiscardScrollPosition = false, NoScrollInterpolation = true,
+        AlignBegin = 0, AlignCenter = 0.5, AlignEnd = 1, AlignNearest = -1 }
     api.PanelTemplates_SetNumTabs = function() end
     api.PanelTemplates_UpdateTabs = function() end
     api.PanelTemplates_TabResize = function() end
@@ -1663,8 +1669,18 @@ function World:MakeEnv(client)
     api.C_Item.GetItemQualityColor = function()
         return 1, 1, 1, "ffffffff"
     end
+    -- What the bags hold: client.bags, plus the stacks in the bag containers
+    -- (0 to 5), as the game counts them.
     api.C_Item.GetItemCount = function(itemID)
-        return client.bags and client.bags[itemID] or 0
+        local count = client.bags and client.bags[itemID] or 0
+        for bag = 0, 5 do
+            for slot, item in pairs(client.containers[bag] or {}) do
+                if type(slot) == "number" and item[1] == itemID then
+                    count = count + item[2]
+                end
+            end
+        end
+        return count
     end
     api.INVTYPE_CHEST, api.INVTYPE_ROBE, api.INVTYPE_FEET, api.INVTYPE_HEAD = "Chest", "Chest", "Feet", "Head"
     api.MenuResponse = { Open = 1, Refresh = 2, Close = 3, CloseAll = 4 }
