@@ -300,6 +300,8 @@ end
 -- Regions that Blizzard's templates give a frame, by template.
 H.TemplateRegions = {
     CircularGiantItemButtonTemplate = { Icon = "Texture", IconBorder = "Texture", Count = "FontString" },
+    -- A top tab's art, not selected and selected (of its TabTextures).
+    PanelTopTabButtonTemplate = { Middle = "Texture", MiddleActive = "Texture" },
     InputBoxInstructionsTemplate = { Instructions = "FontString" },
     InputScrollFrameTemplate = { EditBox = "EditBox", CharCount = "FontString" },
     LargeSideTabButtonTemplate = { Background = "Texture", Icon = "Texture", SelectedTexture = "Texture" },
@@ -397,7 +399,11 @@ H.FrameMethods = {
     SetTextInsets = function(self, left, right, top, bottom)
         self._insets = { left, right, top, bottom }
     end,
+    -- As the game: a scale must be above 0.
     SetScale = function(self, scale)
+        if type(scale) ~= "number" or scale <= 0 then
+            error("Frame:SetScale(): Scale must be > 0", 2)
+        end
         self._scale = scale
     end,
     -- The last anchor set, and the enabled, checked and alpha states, for
@@ -440,12 +446,15 @@ H.FrameMethods = {
 
 -- Blizzard's menus (Blizzard_Menu), as a dropdown builds them: the entries
 -- its generator makes, in order. A button's own entries (its submenu) are
--- in its .entries.
+-- in its .entries. An entry made disabled has enabled = false.
 function H.NewMenuDescription()
     local description = { entries = {} }
     local function Add(entry)
         function entry:SetTitleAndTextTooltip(title, tooltip)
-            self.tooltip = tooltip
+            self.tooltipTitle, self.tooltip = title, tooltip
+        end
+        function entry:SetEnabled(enabled)
+            self.enabled = enabled
         end
         description.entries[#description.entries + 1] = entry
         return entry
@@ -1604,6 +1613,11 @@ function World:MakeEnv(client)
     api.GameTooltip_Hide = function() end
     api.RETRIEVING_ITEM_INFO = "Retrieving item information"
     api.NORMAL_FONT_COLOR = { GetRGB = function() return 1, 0.82, 0 end }
+    -- The game's confirmation dialog: client.confirm keeps what it asks
+    -- (text, text_arg1, callback...); a test accepts by calling its callback.
+    api.StaticPopup_ShowCustomGenericConfirmation = function(data)
+        client.confirm = data
+    end
     api.GREEN_FONT_COLOR = { GetRGB = function() return 0, 1, 0 end }
     api.C_Texture = {
         GetAtlasInfo = function()
@@ -1641,6 +1655,8 @@ function World:MakeEnv(client)
             return true
         end,
     }
+    -- The micro menu's Guild & Communities button, always there.
+    api.GuildMicroButton = H.NewObject(client, "Button")
     if world.communities then
         api.CommunitiesFrame = world.communities(client)
         api.COMMUNITIES_FRAME_DISPLAY_MODES = { ROSTER = { "MemberList" }, GUILD_INFO = { "GuildDetailsFrame" } }
