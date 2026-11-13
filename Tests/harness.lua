@@ -2019,13 +2019,15 @@ function World:MakeEnv(client)
     api.GetSendMailCOD = function()
         return client.sendCOD or 0
     end
-    -- The postage: 30 copper per item attached, 30 with none.
+    -- What sending the mail costs, as the game counts it: the postage (30
+    -- copper per item attached, 30 with none) and the money it carries
+    -- (seen in game: a mail with 1 copper costs 31).
     api.GetSendMailPrice = function()
         local count = 0
         for _ in pairs(client.sendMail or {}) do
             count = count + 1
         end
-        return 30 * math.max(count, 1)
+        return 30 * math.max(count, 1) + (client.sendMoney or 0)
     end
     -- The world delivers it (World:Mail).
     api.SendMail = function() end
