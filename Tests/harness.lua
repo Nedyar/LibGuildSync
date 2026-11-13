@@ -1618,6 +1618,33 @@ function World:MakeEnv(client)
     api.StaticPopup_ShowCustomGenericConfirmation = function(data)
         client.confirm = data
     end
+    -- The game's settings panel (Options > AddOns): client.settings keeps the
+    -- categories registered ({ frame, name, subcategories, registered }).
+    api.SettingsPanel = NewObject(client, "Frame")
+    api.SettingsPanel:Hide()
+    local function Category(frame, name)
+        return { frame = frame, name = name, subcategories = {}, GetID = function() return name end }
+    end
+    api.Settings = {
+        RegisterCanvasLayoutCategory = function(frame, name)
+            local category = Category(frame, name)
+            client.settings = client.settings or {}
+            client.settings[#client.settings + 1] = category
+            return category
+        end,
+        RegisterCanvasLayoutSubcategory = function(parent, frame, name)
+            local category = Category(frame, name)
+            parent.subcategories[#parent.subcategories + 1] = category
+            return category
+        end,
+        RegisterAddOnCategory = function(category)
+            category.registered = true
+        end,
+        OpenToCategory = function(id)
+            client.openedSettings = id
+            api.SettingsPanel:Show()
+        end,
+    }
     api.GREEN_FONT_COLOR = { GetRGB = function() return 0, 1, 0 end }
     api.C_Texture = {
         GetAtlasInfo = function()
