@@ -1,3 +1,5 @@
+<p align="center"><img src=".github/logo.png" alt="LibGuildSync logo" width="160"></p>
+
 # LibGuildSync
 
 Shared code for guild addons on WoW Forever (the `_forever_` client,
