@@ -108,6 +108,19 @@ local first = twice.guilds["Test Guild"].members[GUID].b
 Data.PackForSave(twice)
 H.eq(twice.guilds["Test Guild"].members[GUID].b, first, "packing twice changes nothing")
 
+-- Another addon reads the records, before and after they are packed.
+local before = Data.Records("Test Guild")
+H.check(ns.Same(before[GUID], savedGuild.members[GUID]), "another addon reads a guild's records")
+before[GUID].v = "changed"
+before[OTHER] = {}
+H.check(savedGuild.members[GUID].v == "note" and savedGuild.members[OTHER] == nil, "as copies of its own")
+local realDB = ns.db
+ns.db = twice
+local after = Data.Records("Test Guild")
+H.check(ns.Same(after[GUID], record) and type(after[GUID].k) == "table", "and still the records once packed for the saved variables")
+H.check(next(Data.Records("Other Guild")) == nil and next(Data.Records(nil)) == nil, "nothing for a guild it does not know")
+ns.db = realDB
+
 -- An addon that saved its records its own way before it used the library.
 Data.UpgradeSaved = function(db)
     -- Its first form knew guilds as "Name-Realm".

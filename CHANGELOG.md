@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0
+
+- **Addons can read each other's records** (`Data.Records`), also at logout, after the addon that owns them has packed them for the saved variables.
+
 ## 0.2.0
 
 - **More for the addons built on it**: message types of their own, shorter messages for some changes, changes announced within seconds, test messages, and a saved form of their own for addons that saved their records another way before.

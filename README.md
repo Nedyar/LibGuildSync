@@ -88,6 +88,13 @@ says what changed). Events reach the addon through `ns.On`: `GuildChanged`,
 `RosterUpdated`, `DataChanged`, `RecordChanged`, `OwnChanged`,
 `TargetOffline`.
 
+Another addon can read an attached addon's records: find its namespace in
+`LibGuildSync.attached` (by `ns.ADDON_NAME`) and call
+`ns.Data.Records(guildKey)`, a new table `{ [GUID] = record }` of checked
+copies (the owner's `Data.CleanRecord`). It works at logout too, after the
+owner has packed its records for the saved variables (0.3.0 and later).
+The fields are the owner's own, as its Pack.lua describes them.
+
 ### Going further (0.2.0 and later)
 
 - **Quick changes**: `ns.Sync.QUICK_KINDS[kind] = true` announces changes

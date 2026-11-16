@@ -192,6 +192,7 @@ function Lib.NewStore(ns)
     -- Records are saved packed (see Data.PackForSave): the client writes
     -- each number of a plain table on its own line, ten times the size.
     -- An addon may save them its own way (Data.SaveRecord, Data.LoadRecord).
+    -- Each packed form leads back to the record it packs (see Data.Records).
     local packedForms = setmetatable({}, { __mode = "k" })
 
     local function PackRecord(guid, record)
@@ -281,7 +282,7 @@ function Lib.NewStore(ns)
                 -- Packing twice (a second logout event) changes nothing.
                 if not packedForms[record] then
                     local saved = PackRecord(guid, record)
-                    packedForms[saved] = true
+                    packedForms[saved] = record
                     guild.members[guid] = saved
                 end
             end
@@ -305,6 +306,24 @@ function Lib.NewStore(ns)
 
     function Data.CurrentGuild(create)
         return Data.GetGuild(ns.Roster.guildKey, create)
+    end
+
+    -- A guild's members as records ({ [GUID] = record }), for another addon
+    -- to read: checked copies (Data.CleanRecord), so the reader never
+    -- changes the addon's own. Also at logout, after Data.PackForSave has put
+    -- the packed forms in their place (addons get the logout one after the
+    -- other), even for an addon whose Data.SaveRecord packed parts of a
+    -- record in place: its Data.CleanRecord reads those, as when loading.
+    function Data.Records(guildKey)
+        local guild = guildKey and ns.db and ns.db.guilds[guildKey]
+        local records = {}
+        for guid, record in pairs(guild and guild.members or {}) do
+            local ok, clean = pcall(Data.CleanRecord, packedForms[record] or record)
+            if ok and clean then
+                records[guid] = clean
+            end
+        end
+        return records
     end
 
     -- Lookups that are rebuilt whenever the data changes (never saved).
